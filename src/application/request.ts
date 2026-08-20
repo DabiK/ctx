@@ -2,12 +2,13 @@
  * `ctx read` application use case — the clipboard round trip.
  *
  * Reads the current clipboard content, parses the `@ctx` request it contains
- * (this build: `file`, `files`, `tree`, `glob`, `inspect`, and `search`),
- * executes the operations, and copies one stable protocol response back.
- * Requests containing only read ops keep the legacy single read response;
- * any request with discovery ops produces a combined response with one
- * section per operation. Malformed or unsupported requests produce a
- * structured refusal response instead of touching the filesystem.
+ * (this build: `file`, `files`, `tree`, `glob`, `inspect`, `search`,
+ * `status`, `changed`, `diff`, `log`, and `show`), executes the operations,
+ * and copies one stable protocol response back. Requests containing only
+ * read ops keep the legacy single read response; any other request produces
+ * a combined response with one section per operation. Malformed or
+ * unsupported requests produce a structured refusal response instead of
+ * touching the filesystem or running any Git command.
  */
 
 import { PRODUCT_NAME } from "../branding.js";
@@ -19,6 +20,7 @@ import {
   requireGitRoot,
 } from "./common.js";
 import { DiscoveryUseCase, type OpExecution } from "./discovery.js";
+import { GitUseCase } from "./git.js";
 import type {
   ClipboardPort,
   FsPort,
@@ -43,6 +45,7 @@ export class RequestUseCase {
   private readonly reader: ReadUseCase;
   private readonly discovery: DiscoveryUseCase;
   private readonly search: SearchUseCase;
+  private readonly gitOps: GitUseCase;
 
   constructor(
     private readonly clipboard: ClipboardPort,
@@ -54,6 +57,7 @@ export class RequestUseCase {
     this.reader = new ReadUseCase(clipboard, terminal, git, fs);
     this.discovery = new DiscoveryUseCase(clipboard, terminal, git, fs);
     this.search = new SearchUseCase(clipboard, terminal, git, fs, search);
+    this.gitOps = new GitUseCase(clipboard, terminal, git, fs);
   }
 
   async read(opts: RequestOptions): Promise<number> {
@@ -128,6 +132,21 @@ export class RequestUseCase {
           break;
         case "search":
           exec = await this.search.collectSearch(op.query, opts.allowSensitive, null);
+          break;
+        case "status":
+          exec = await this.gitOps.collectStatus(opts.allowSensitive);
+          break;
+        case "changed":
+          exec = await this.gitOps.collectChanged(op.path, opts.allowSensitive);
+          break;
+        case "diff":
+          exec = await this.gitOps.collectDiff(op.path, op.staged, opts.allowSensitive);
+          break;
+        case "log":
+          exec = await this.gitOps.collectLog(op.path, opts.allowSensitive, op.limit);
+          break;
+        case "show":
+          exec = await this.gitOps.collectShow(op.rev, op.path, opts.allowSensitive);
           break;
       }
 

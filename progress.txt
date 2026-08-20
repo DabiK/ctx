@@ -86,3 +86,48 @@
   symlink). Verified the packaged CLI manually with a real `tmp-link -> /tmp`
   symlink: tree/glob/`--copy`/`@ctx read` show no external names. 147 tests pass.
 
+## 2026-08-20 — #5 Git context operations
+
+- Added read-only Git context operations through the same boundary and protocol:
+  direct `status`, `changed [path]`, `diff [--staged] [path]`, `log [path]`
+  (bounded by default), and `show <rev> <path>` commands plus the corresponding
+  `@ctx` ops.
+- `GitPort` is the fixed allowlist of Git behavior: `status`, `diff`, `log`, and
+  `show`, each mapping to one well-defined read-only `git` invocation with a
+  static argument list (no shell, no arbitrary Git execution). Values from the
+  application layer (validated paths, safe revisions, limits) are passed as
+  separate argv elements.
+- `SystemGit` gained the four operations with pure, exported parsers
+  (`parsePorcelainV1` buckets staged/modified/untracked/deleted and parses the
+  branch line incl. detached HEAD and unborn branches; `parseNumstat` sums
+  insertions/deletions; `parseLogOutput` parses `%h|%ad|%s`). Diff runs
+  `--numstat` (summary) and the full text in parallel; scoped paths use the
+  `:(literal)` pathspec so glob/magic characters match as themselves; an empty
+  (unborn) repository is an empty log state, not a failure.
+- `GitUseCase` (application layer) applies the boundary uniformly: scoped paths
+  for changed/diff/log are validated with `PathGuard.guardDir` and refusals are
+  explained parts, never silent filters; `show` validates its revision and path
+  syntactically (`isSafeRevision`/`isSafeShowPath` in `protocol.ts`) and reads
+  only from the object store, so it can show files deleted from the working
+  tree. Unsafe revisions/command fragments are refused at parse time (whole
+  request), CLI parse time, and defensively in the use case before the port.
+- Protocol parser gained `status`, `changed [path]`, `diff [--staged] [path]`,
+  `log [--limit N] [path]`, and `show <rev> <path>`; `SUPPORTED_OPS` updated;
+  mixed Git/read/discovery requests produce one combined `# CTX RESPONSE`.
+- CLI gained the five commands with `--staged` and `--limit` wiring, per-command
+  help, and usage errors for malformed/unsafe show forms.
+- Response builders: `buildStatusPart` (branch + per-state counts and lists),
+  `buildChangedPart` (flat list with state), `buildDiffPart` (summary numbers +
+  diff text), `buildLogPart` (explicit `limited: yes (max N)` when the bound is
+  hit), `buildShowPart` (content or the Git diagnostic).
+- Tests: unit suites for the protocol parser (git ops, safe-rev/path allowlist),
+  the GitUseCase with fake Git/Fs ports, the pure platform parsers, and the CLI;
+  real-temporary-repository integration coverage for normal results, staged vs
+  working-tree diffs, path scoping, empty states (clean tree, no commits, empty
+  diff), bad revisions, deleted-file `show`, protocol round trips, unsafe-rev
+  refusal, and non-repository failure. 198 tests pass; typecheck clean.
+- Verified the packaged CLI manually on macOS: status/changed/diff (working +
+  staged + scoped)/log/show, a combined `@ctx status + @ctx log + @ctx show`
+  round trip, unsafe `@ctx show a..b` refusal copied to the clipboard, and
+  non-repository failure with an actionable message.
+

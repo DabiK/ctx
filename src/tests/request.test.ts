@@ -65,14 +65,14 @@ describe("RequestUseCase.read", () => {
 
   it("copies a structured refusal for malformed requests", async () => {
     const { ports, clipboard } = fakePorts();
-    clipboard.content = "@ctx status";
+    clipboard.content = "@ctx batch read a.ts";
 
     const code = await makeRequest(ports).read({ allowSensitive: false });
 
     assert.equal(code, 1);
     const copied = clipboard.lastCopied() ?? "";
     assert.ok(copied.includes("## Request refused"));
-    assert.ok(copied.includes("unsupported operation `status`"));
+    assert.ok(copied.includes("unsupported operation `batch`"));
     assert.ok(copied.includes("file <path>"));
   });
 

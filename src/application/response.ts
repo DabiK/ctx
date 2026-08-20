@@ -10,6 +10,7 @@
 
 import { RESPONSE_MARKER } from "../branding.js";
 import { estimateTokens, utf8ByteLength } from "./common.js";
+import type { GitDiff, GitLogEntry, GitShowResult, GitStatus, GitStatusFile } from "./ports.js";
 
 /** One successfully read file section. */
 export interface ReadItem {
@@ -257,6 +258,143 @@ export function buildCombinedResponse(parts: ResponsePart[]): string {
     lines.push(...part.lines);
   }
   return buildEnvelope(lines);
+}
+
+/** Count `status.files` per state bucket (returns 0 for missing buckets). */
+function countState(files: GitStatusFile[], state: GitStatusFile["state"]): number {
+  return files.filter((f) => f.state === state).length;
+}
+
+/** Status block: branch, per-state counts, and one list per non-empty bucket. */
+export function buildStatusPart(status: GitStatus): ResponsePart {
+  const staged = countState(status.files, "staged");
+  const modified = countState(status.files, "modified");
+  const untracked = countState(status.files, "untracked");
+  const deleted = countState(status.files, "deleted");
+
+  const lines: string[] = [
+    `Branch: ${status.branch ?? "(detached HEAD)"}`,
+    `Staged: ${staged} | Modified: ${modified} | Untracked: ${untracked} | Deleted: ${deleted}`,
+    `bytes: ${0} | tokens: ~${0}`,
+  ];
+  if (status.files.length === 0) {
+    lines.push("Working tree clean.");
+    const bytes = utf8ByteLength(lines.join("\n"));
+    lines[2] = `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`;
+    return { title: "Status", lines, bytes };
+  }
+
+  const buckets: Array<[string, GitStatusFile["state"]]> = [
+    ["Staged", "staged"],
+    ["Modified", "modified"],
+    ["Untracked", "untracked"],
+    ["Deleted", "deleted"],
+  ];
+  for (const [label, state] of buckets) {
+    const files = status.files.filter((f) => f.state === state);
+    if (files.length === 0) {
+      continue;
+    }
+    lines.push("", `${label}:`);
+    for (const file of files) {
+      lines.push(`- ${file.relPath}`);
+    }
+  }
+
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines[2] = `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`;
+  return { title: "Status", lines, bytes };
+}
+
+/** Changed-files block: one flat list of files with their state bucket. */
+export function buildChangedPart(status: GitStatus, scope: string | null): ResponsePart {
+  const staged = countState(status.files, "staged");
+  const modified = countState(status.files, "modified");
+  const untracked = countState(status.files, "untracked");
+  const deleted = countState(status.files, "deleted");
+
+  const lines: string[] = [
+    `Files: ${status.files.length} | Staged: ${staged} | Modified: ${modified} | ` +
+      `Untracked: ${untracked} | Deleted: ${deleted}`,
+    `bytes: ${0} | tokens: ~${0}`,
+  ];
+  if (status.files.length === 0) {
+    lines.push("No changes.");
+  } else {
+    for (const file of status.files) {
+      lines.push(`- ${file.relPath} (${file.state})`);
+    }
+  }
+
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines[1] = `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`;
+  return {
+    title: scope !== null ? `Changed ${scope}` : "Changed",
+    lines,
+    bytes,
+  };
+}
+
+/** Diff block: summary numbers plus the diff text itself. */
+export function buildDiffPart(diff: GitDiff, scope: string | null, staged: boolean): ResponsePart {
+  const label = staged ? "staged" : "working tree";
+  const title = scope !== null ? `Diff ${scope} (${label})` : `Diff (${label})`;
+
+  const lines: string[] = [
+    `Files: ${diff.files} | Insertions: ${diff.insertions} | Deletions: ${diff.deletions}`,
+    `bytes: ${0} | tokens: ~${0}`,
+  ];
+  if (diff.text === "") {
+    lines.push("No changes.");
+  } else {
+    lines.push("", diff.text.replace(/\n$/, ""));
+  }
+
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines[1] = `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`;
+  return { title, lines, bytes };
+}
+
+/** Log block: bounded recent commits, one line each. */
+export function buildLogPart(
+  entries: GitLogEntry[],
+  scope: string | null,
+  maxCommits: number,
+): ResponsePart {
+  const title = scope !== null ? `Log ${scope} (${entries.length} commits)` : `Log (${entries.length} commits)`;
+  const limitedNote =
+    entries.length > 0 && entries.length >= maxCommits
+      ? ` | limited: yes (max ${maxCommits})`
+      : "";
+  const lines: string[] = [
+    `Commits: ${entries.length}${limitedNote}`,
+    `bytes: ${0} | tokens: ~${0}`,
+  ];
+  if (entries.length === 0) {
+    lines.push("No commits.");
+  } else {
+    for (const entry of entries) {
+      lines.push(`- ${entry.shortHash} ${entry.date} ${entry.subject}`);
+    }
+  }
+
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines[1] = `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`;
+  return { title, lines, bytes };
+}
+
+/** Show block: blob content at a revision, or the Git diagnostic. */
+export function buildShowPart(result: GitShowResult, rev: string, path: string): ResponsePart {
+  const title = `Show ${rev}:${path}`;
+  if (!result.ok) {
+    const lines = [`Not shown — ${result.error}`];
+    const bytes = utf8ByteLength(lines.join("\n"));
+    return { title, lines, bytes };
+  }
+  const lines = [`bytes: ${0} | tokens: ~${0}`, "", result.content];
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines[0] = `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`;
+  return { title, lines, bytes };
 }
 
 /** Structured refusal response for a malformed or unsupported request. */

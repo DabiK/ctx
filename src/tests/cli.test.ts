@@ -22,6 +22,7 @@ describe("parseArgs", () => {
       compact: false,
       copy: false,
       allowSensitive: false,
+      staged: false,
       depth: null,
       limit: null,
       args: [],
@@ -111,6 +112,45 @@ describe("parseArgs", () => {
     assert.ok(!("error" in d));
     assert.equal(d.parsed.help, true);
   });
+
+  it("parses the Git context commands and their options", () => {
+    const status = parseArgs(["status", "--copy"]);
+    assert.ok(!("error" in status));
+    assert.equal(status.parsed.command, "status");
+    assert.equal(status.parsed.copy, true);
+
+    const changed = parseArgs(["changed", "src/lib"]);
+    assert.ok(!("error" in changed));
+    assert.equal(changed.parsed.command, "changed");
+    assert.deepEqual(changed.parsed.args, ["src/lib"]);
+
+    const diff = parseArgs(["diff", "--staged", "src/app.ts", "--copy"]);
+    assert.ok(!("error" in diff));
+    assert.equal(diff.parsed.command, "diff");
+    assert.equal(diff.parsed.staged, true);
+    assert.deepEqual(diff.parsed.args, ["src/app.ts"]);
+
+    const log = parseArgs(["log", "--limit", "7"]);
+    assert.ok(!("error" in log));
+    assert.equal(log.parsed.command, "log");
+    assert.equal(log.parsed.limit, 7);
+
+    const show = parseArgs(["show", "HEAD~2", "src/app.ts"]);
+    assert.ok(!("error" in show));
+    assert.equal(show.parsed.command, "show");
+    assert.deepEqual(show.parsed.args, ["HEAD~2", "src/app.ts"]);
+
+    assert.ok("error" in parseArgs(["status", "extra"]));
+    assert.ok("error" in parseArgs(["changed", "a", "b"]));
+    assert.ok("error" in parseArgs(["diff", "a", "b"]));
+    assert.ok("error" in parseArgs(["log", "--limit", "0"]));
+    assert.ok("error" in parseArgs(["log", "a", "b"]));
+    assert.ok("error" in parseArgs(["show"]));
+    assert.ok("error" in parseArgs(["show", "HEAD"]));
+    assert.ok("error" in parseArgs(["show", "HEAD", "a", "b"]));
+    assert.ok("error" in parseArgs(["show", "$(rm -rf /)", "src/app.ts"]));
+    assert.ok("error" in parseArgs(["show", "HEAD", "/etc/passwd"]));
+  });
 });
 
 describe("runCli", () => {
@@ -121,7 +161,7 @@ describe("runCli", () => {
     assert.ok(terminal.infoLines.join("\n").includes("Usage:"));
   });
 
-  it("provides help for init, prompt, doctor, file, files, read, tree, glob, inspect, and search", async () => {
+  it("provides help for init, prompt, doctor, file, files, read, tree, glob, inspect, search, status, changed, diff, log, and show", async () => {
     for (const cmd of [
       "init",
       "prompt",
@@ -133,6 +173,11 @@ describe("runCli", () => {
       "glob",
       "inspect",
       "search",
+      "status",
+      "changed",
+      "diff",
+      "log",
+      "show",
     ]) {
       const { ports, terminal } = fakePorts();
       const code = await runCli([cmd, "--help"], ports);
@@ -273,5 +318,66 @@ describe("runCli", () => {
     const copied = clipboard.lastCopied() ?? "";
     assert.ok(copied.includes("## Tree (depth 1"));
     assert.ok(copied.includes("## Search \"alpha\" (fake)"));
+  });
+
+  it("runs status and changed through the CLI with fake Git data", async () => {
+    const { ports, terminal, clipboard, git, fs } = fakePorts();
+    git.statusFiles = [
+      { relPath: "src/app.ts", state: "staged" },
+      { relPath: "notes.md", state: "untracked" },
+    ];
+    fs.seed("/repo/src/app.ts", "app\n");
+
+    const statusCode = await runCli(["status"], ports);
+    assert.equal(statusCode, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("Branch: main"));
+    assert.equal(clipboard.lastCopied(), null, "no copy without --copy");
+
+    const changedCode = await runCli(["changed", "src", "--copy"], ports);
+    assert.equal(changedCode, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("- src/app.ts (staged)"));
+    assert.ok((clipboard.lastCopied() ?? "").includes(RESPONSE_MARKER));
+  });
+
+  it("runs diff, log, and show through the CLI with fake Git data", async () => {
+    const { ports, terminal, git, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "app\n");
+    git.diffText = "+new\n-old\n";
+    git.diffFiles = 1;
+    git.diffInsertions = 1;
+    git.diffDeletions = 1;
+    git.logEntries = [{ shortHash: "8f3a9b1", date: "2026-08-20", subject: "Add git context" }];
+    git.showContents.set("HEAD:src/app.ts", "content at HEAD\n");
+
+    const diffCode = await runCli(["diff", "--staged", "src/app.ts"], ports);
+    assert.equal(diffCode, 0);
+    assert.equal(git.lastDiffStaged, true);
+    assert.ok(terminal.infoLines.join("\n").includes("+new"));
+
+    const logCode = await runCli(["log", "--limit", "3"], ports);
+    assert.equal(logCode, 0);
+    assert.equal(git.lastLogLimit, 3);
+    assert.ok(terminal.infoLines.join("\n").includes("8f3a9b1 2026-08-20 Add git context"));
+
+    const showCode = await runCli(["show", "HEAD", "src/app.ts"], ports);
+    assert.equal(showCode, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("content at HEAD"));
+  });
+
+  it("runs a combined Git context request through the CLI read command", async () => {
+    const { ports, clipboard, git, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "app\n");
+    git.statusFiles = [{ relPath: "src/app.ts", state: "staged" }];
+    git.diffFiles = 1;
+    git.diffText = "+alpha\n";
+    clipboard.content = ["@ctx status", "@ctx diff --staged src/app.ts"].join("\n");
+
+    const code = await runCli(["read"], ports);
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Status"));
+    assert.ok(copied.includes("- src/app.ts"));
+    assert.ok(copied.includes("## Diff src/app.ts (staged)"));
   });
 });

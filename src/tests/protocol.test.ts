@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { parsePathSpec, parseRequestText } from "../protocol.js";
+import { parsePathSpec, parseRequestText, isSafeRevision, isSafeShowPath } from "../protocol.js";
 
 describe("parsePathSpec", () => {
   it("accepts a plain path without a range", () => {
@@ -102,15 +102,15 @@ describe("parseRequestText", () => {
   });
 
   it("refuses unsupported operations with a structured reason", () => {
-    const r = parseRequestText("@ctx status");
+    const r = parseRequestText("@ctx batch read a.ts");
     assert.ok(!r.ok);
     if (!r.ok) {
-      assert.ok(r.reason.includes("unsupported operation `status`"));
+      assert.ok(r.reason.includes("unsupported operation `batch`"));
     }
-    const b = parseRequestText("@ctx batch read a.ts");
+    const b = parseRequestText("@ctx nope");
     assert.ok(!b.ok);
     if (!b.ok) {
-      assert.ok(b.reason.includes("unsupported operation `batch`"));
+      assert.ok(b.reason.includes("unsupported operation `nope`"));
     }
   });
 
@@ -208,6 +208,181 @@ describe("parseRequestText", () => {
         { kind: "file", specs: ["a.ts"] },
         { kind: "files", specs: ["b.ts"] },
       ]);
+    }
+  });
+
+  it("parses the Git context operations", () => {
+    const status = parseRequestText("@ctx status");
+    assert.ok(status.ok);
+    if (status.ok) {
+      assert.deepEqual(status.ops, [{ kind: "status" }]);
+    }
+
+    const changed = parseRequestText("@ctx changed src/lib");
+    assert.ok(changed.ok);
+    if (changed.ok) {
+      assert.deepEqual(changed.ops, [{ kind: "changed", path: "src/lib" }]);
+    }
+
+    const changedPlain = parseRequestText("@ctx changed");
+    assert.ok(changedPlain.ok);
+    if (changedPlain.ok) {
+      assert.deepEqual(changedPlain.ops, [{ kind: "changed", path: null }]);
+    }
+
+    const diff = parseRequestText("@ctx diff src/app.ts");
+    assert.ok(diff.ok);
+    if (diff.ok) {
+      assert.deepEqual(diff.ops, [{ kind: "diff", staged: false, path: "src/app.ts" }]);
+    }
+
+    const staged = parseRequestText("@ctx diff --staged");
+    assert.ok(staged.ok);
+    if (staged.ok) {
+      assert.deepEqual(staged.ops, [{ kind: "diff", staged: true, path: null }]);
+    }
+
+    const log = parseRequestText("@ctx log --limit 5 src/lib");
+    assert.ok(log.ok);
+    if (log.ok) {
+      assert.deepEqual(log.ops, [{ kind: "log", limit: 5, path: "src/lib" }]);
+    }
+
+    const show = parseRequestText("@ctx show HEAD~1 src/app.ts");
+    assert.ok(show.ok);
+    if (show.ok) {
+      assert.deepEqual(show.ops, [{ kind: "show", rev: "HEAD~1", path: "src/app.ts" }]);
+    }
+  });
+
+  it("mixes Git operations with reads and discovery in one request", () => {
+    const r = parseRequestText(["@ctx status", "@ctx diff --staged src/app.ts"].join("\n"));
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.deepEqual(r.ops, [
+        { kind: "status" },
+        { kind: "diff", staged: true, path: "src/app.ts" },
+      ]);
+    }
+  });
+
+  it("refuses malformed Git context requests", () => {
+    assert.ok(!parseRequestText("@ctx status extra").ok);
+    assert.ok(!parseRequestText("@ctx changed a b").ok);
+    assert.ok(!parseRequestText("@ctx diff a b").ok);
+    assert.ok(!parseRequestText("@ctx log --limit 0").ok);
+    assert.ok(!parseRequestText("@ctx log --limit 1001").ok);
+    assert.ok(!parseRequestText("@ctx log a b").ok);
+    assert.ok(!parseRequestText("@ctx show HEAD").ok);
+    assert.ok(!parseRequestText("@ctx show HEAD a b").ok);
+  });
+
+  it("refuses unsafe revisions in show requests before any execution", () => {
+    for (const rev of [
+      "$(rm -rf /)",
+      "HEAD;ls",
+      "a..b",
+      "-n",
+      "--all",
+      "feature x",
+      "..",
+      "HEAD~",
+      "a//b",
+      "a/./b",
+      "refs\\heads\\main",
+      "",
+    ]) {
+      const r = parseRequestText(`@ctx show ${rev} src/app.ts`);
+      assert.ok(!r.ok, `revision \`${rev}\` must be refused`);
+      if (!r.ok) {
+        assert.ok(
+          r.reason.includes("unsafe revision") || r.reason.includes("requires exactly"),
+          `reason for \`${rev}\`: ${r.reason}`,
+        );
+      }
+    }
+  });
+
+  it("refuses unsafe show paths", () => {
+    for (const path of ["/etc/passwd", "../secret", "C:\\Windows\\x", "a:b", "a%b", "..", "", "dir//..", "."]) {
+      const r = parseRequestText(`@ctx show HEAD ${path}`);
+      assert.ok(!r.ok, `path \`${path}\` must be refused`);
+      if (!r.ok) {
+        assert.ok(
+          r.reason.includes("unsafe path") || r.reason.includes("requires exactly"),
+          `reason for \`${path}\`: ${r.reason}`,
+        );
+      }
+    }
+  });
+});
+
+describe("isSafeRevision", () => {
+  it("accepts HEAD, ancestry, hashes, and plain branch/tag names", () => {
+    for (const rev of [
+      "HEAD",
+      "HEAD~1",
+      "HEAD~42",
+      "HEAD^",
+      "HEAD^2",
+      "a1b2c3d",
+      "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+      "main",
+      "feature/x",
+      "release-1.2",
+      "v1.2.3",
+      "refs/heads/main",
+      "origin/main",
+      "fix_123",
+    ]) {
+      assert.equal(isSafeRevision(rev), true, `\`${rev}\` should be safe`);
+    }
+  });
+
+  it("refuses command fragments, ranges, and option-like forms", () => {
+    for (const rev of [
+      "",
+      "HEAD;ls",
+      "$(echo x)",
+      "`id`",
+      "a..b",
+      "-x",
+      "--all",
+      "feature x",
+      "HEAD~",
+      "HEAD~-1",
+      "a//b",
+      "a/./b",
+      "a.",
+      ".hidden",
+      "a b/c",
+    ]) {
+      assert.equal(isSafeRevision(rev), false, `\`${rev}\` must be refused`);
+    }
+  });
+});
+
+describe("isSafeShowPath", () => {
+  it("accepts repository-relative paths", () => {
+    for (const path of ["src/app.ts", "docs/guide.md", "README.md", "a/b/c.txt", "dir.with-dots/x"]) {
+      assert.equal(isSafeShowPath(path), true, `\`${path}\` should be safe`);
+    }
+  });
+
+  it("refuses absolute, traversal, and special-character paths", () => {
+    for (const path of [
+      "",
+      "/etc/passwd",
+      "C:\\Windows\\x",
+      "../secret",
+      "a/../b",
+      "a:b",
+      "a%b",
+      "..",
+      ".",
+      "  ",
+    ]) {
+      assert.equal(isSafeShowPath(path), false, `\`${path}\` must be refused`);
     }
   });
 });

@@ -7,7 +7,12 @@ import type {
   ClipboardPort,
   EnvPort,
   FsPort,
+  GitDiff,
+  GitLogEntry,
   GitPort,
+  GitShowResult,
+  GitStatus,
+  GitStatusFile,
   PlatformPorts,
   SearchMatch,
   SearchPort,
@@ -59,8 +64,81 @@ export class FakeGit implements GitPort {
   /** Repository root to report for every query; `null` means "not a repo". */
   rootToReport: string | null = "/repo";
 
+  /** Branch reported by `status` (null = detached HEAD). */
+  branch: string | null = "main";
+  /** Changed files reported by `status`. */
+  statusFiles: GitStatusFile[] = [];
+  /** Diff text and summary numbers reported by `diff`. */
+  diffText = "";
+  diffFiles = 0;
+  diffInsertions = 0;
+  diffDeletions = 0;
+  /** Commits reported by `log`. */
+  logEntries: GitLogEntry[] = [];
+  /** `rev:path` → blob content reported by `show`. */
+  showContents = new Map<string, string>();
+  /** `rev:path` → git diagnostic reported by `show` for unknown objects. */
+  showErrors = new Map<string, string>();
+  /** When set, every port call throws (simulates a Git failure). */
+  failWith: Error | null = null;
+
+  lastDiffPath: string | null = null;
+  lastDiffStaged = false;
+  lastLogPath: string | null = null;
+  lastLogLimit = 0;
+  lastShowRev = "";
+  lastShowPath = "";
+
   async root(_dir: string): Promise<string | null> {
     return this.rootToReport;
+  }
+
+  async status(_root: string): Promise<GitStatus> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    return { branch: this.branch, files: this.statusFiles };
+  }
+
+  async diff(_root: string, path: string | null, staged: boolean): Promise<GitDiff> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    this.lastDiffPath = path;
+    this.lastDiffStaged = staged;
+    return {
+      text: this.diffText,
+      files: this.diffFiles,
+      insertions: this.diffInsertions,
+      deletions: this.diffDeletions,
+    };
+  }
+
+  async log(_root: string, path: string | null, limit: number): Promise<GitLogEntry[]> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    this.lastLogPath = path;
+    this.lastLogLimit = limit;
+    return this.logEntries.slice(0, limit);
+  }
+
+  async show(_root: string, rev: string, path: string): Promise<GitShowResult> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    this.lastShowRev = rev;
+    this.lastShowPath = path;
+    const key = `${rev}:${path}`;
+    const error = this.showErrors.get(key);
+    if (error !== undefined) {
+      return { ok: false, error };
+    }
+    const content = this.showContents.get(key);
+    if (content !== undefined) {
+      return { ok: true, content };
+    }
+    return { ok: false, error: `fatal: path '${path}' does not exist in '${rev}'` };
   }
 }
 

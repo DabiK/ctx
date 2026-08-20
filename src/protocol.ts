@@ -2,15 +2,18 @@
  * `@ctx` protocol request parsing (pure domain logic).
  *
  * This build supports the read operations `@ctx file <path>[:<start>-<end>]`,
- * `@ctx files <path>[:<range>] <path>...` and the discovery operations
+ * `@ctx files <path>[:<range>] <path>...`, the discovery operations
  * `@ctx tree [--depth N]`, `@ctx glob <pattern>`, `@ctx inspect [path]`, and
- * `@ctx search <query>`. Everything else is a structured refusal so the LLM
- * receives a safe next request. Non-`@ctx` lines (ordinary chat text) are
- * ignored. Malformed inputs never touch the filesystem.
+ * `@ctx search <query>`, and the read-only Git context operations
+ * `@ctx status`, `@ctx changed [path]`, `@ctx diff [--staged] [path]`,
+ * `@ctx log [--limit N] [path]`, and `@ctx show <rev> <path>`. Everything
+ * else is a structured refusal so the LLM receives a safe next request.
+ * Non-`@ctx` lines (ordinary chat text) are ignored. Malformed inputs never
+ * touch the filesystem or run any Git command.
  */
 
 import { REQUEST_MARKER } from "./branding.js";
-import { MAX_DEPTH } from "./config.js";
+import { MAX_DEPTH, MAX_RESULTS } from "./config.js";
 
 /** 1-based inclusive line range. */
 export interface LineRange {
@@ -25,7 +28,12 @@ export type RequestOp =
   | { kind: "tree"; depth: number | null }
   | { kind: "glob"; pattern: string }
   | { kind: "inspect"; path: string | null }
-  | { kind: "search"; query: string };
+  | { kind: "search"; query: string }
+  | { kind: "status" }
+  | { kind: "changed"; path: string | null }
+  | { kind: "diff"; staged: boolean; path: string | null }
+  | { kind: "log"; limit: number | null; path: string | null }
+  | { kind: "show"; rev: string; path: string };
 
 export type ParsedRequest =
   | { ok: true; ops: RequestOp[] }
@@ -33,7 +41,60 @@ export type ParsedRequest =
 
 /** Supported operations in this build, for refusal responses. */
 export const SUPPORTED_OPS =
-  "file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], and search <query>";
+  "file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], search <query>, status, changed [path], diff [--staged] [path], log [--limit N] [path], and show <rev> <path>";
+
+/**
+ * True when `rev` is a safe, unambiguous Git revision for `show`: HEAD (with
+ * optional `~N`/`^N` ancestry), a full or abbreviated hex commit hash, or a
+ * branch/tag name made of dot-separated alphanumeric segments. Anything that
+ * could smuggle command fragments, options, or revision ranges (spaces,
+ * `..`, shell metacharacters, leading dashes) is refused.
+ */
+export function isSafeRevision(rev: string): boolean {
+  if (rev.length === 0 || rev.length > 100) {
+    return false;
+  }
+  if (rev === "HEAD") {
+    return true;
+  }
+  if (/^HEAD(~[0-9]+|\^[0-9]*)$/.test(rev)) {
+    return true;
+  }
+  if (/^[0-9a-fA-F]{7,40}$/.test(rev)) {
+    return true;
+  }
+  if (
+    /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/.test(rev) &&
+    !/[/.][/.]/.test(rev)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True when a `show` path is syntactically safe: repository-relative (no
+ * absolute path, no `..` traversal) and free of the `:`/`%` characters that
+ * Git path syntax treats specially in `<rev>:<path>` form. `show` reads from
+ * the object store, so existence is validated by Git itself; this check
+ * refuses only forms that could be misparsed or escape the repository.
+ */
+export function isSafeShowPath(path: string): boolean {
+  const trimmed = path.trim();
+  if (trimmed === "" || trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.includes(":") || trimmed.includes("%")) {
+    return false;
+  }
+  const segments = trimmed.split(/[\\/]+/).filter((s) => s.length > 0);
+  return (
+    segments.length > 0 &&
+    !segments.some((s) => s === ".." || s === ".") &&
+    !trimmed.endsWith("/") &&
+    !trimmed.endsWith("\\")
+  );
+}
 
 export type PathSpec =
   | { ok: true; path: string; range: LineRange | null }
@@ -192,6 +253,89 @@ export function parseRequestText(text: string): ParsedRequest {
         return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires a non-empty query` };
       }
       ops.push({ kind: "search", query });
+    } else if (op === "status") {
+      if (args.length !== 0) {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} status\` accepts no arguments (got: ${args.join(" ")})`,
+        };
+      }
+      ops.push({ kind: "status" });
+    } else if (op === "changed") {
+      if (args.length > 1) {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} changed\` accepts at most one optional path (got ${args.length})`,
+        };
+      }
+      ops.push({ kind: "changed", path: args[0] ?? null });
+    } else if (op === "diff") {
+      let staged = false;
+      let path: string | null = null;
+      for (const arg of args) {
+        if (arg === "--staged") {
+          staged = true;
+        } else if (path === null) {
+          path = arg;
+        } else {
+          return {
+            ok: false,
+            reason: `\`${REQUEST_MARKER} diff\` accepts only [--staged] and one optional path (got: ${args.join(" ")})`,
+          };
+        }
+      }
+      ops.push({ kind: "diff", staged, path });
+    } else if (op === "log") {
+      let limit: number | null = null;
+      let path: string | null = null;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i] ?? "";
+        if (arg === "--limit") {
+          const n = Number(args[i + 1]);
+          if (!Number.isInteger(n) || n < 1 || n > MAX_RESULTS) {
+            return {
+              ok: false,
+              reason: `\`${REQUEST_MARKER} log --limit\` requires an integer between 1 and ${MAX_RESULTS}`,
+            };
+          }
+          limit = n;
+          i++;
+        } else if (path === null) {
+          path = arg;
+        } else {
+          return {
+            ok: false,
+            reason: `\`${REQUEST_MARKER} log\` accepts only [--limit N] and one optional path (got: ${args.join(" ")})`,
+          };
+        }
+      }
+      ops.push({ kind: "log", limit, path });
+    } else if (op === "show") {
+      if (args.length !== 2) {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} show\` requires exactly <rev> and <path> (got ${args.length})`,
+        };
+      }
+      const rev = args[0] ?? "";
+      const path = args[1] ?? "";
+      if (!isSafeRevision(rev)) {
+        return {
+          ok: false,
+          reason:
+            `unsafe revision \`${rev}\` — show accepts only HEAD (with ~N/^N), ` +
+            `hex commit hashes, or plain branch/tag names`,
+        };
+      }
+      if (!isSafeShowPath(path)) {
+        return {
+          ok: false,
+          reason:
+            `unsafe path \`${path}\` — show paths must be repository-relative ` +
+            `and free of traversal and \`:\`/\`%\` characters`,
+        };
+      }
+      ops.push({ kind: "show", rev, path });
     } else {
       return {
         ok: false,

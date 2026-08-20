@@ -80,7 +80,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #3 Safe clipboard file context.
   >
 
-- [ ] #5 — Git context operations (labels: ready-for-agent)
+- [x] #5 — Git context operations (labels: ready-for-agent)
 
   **Issue #5 — détail complet**
   > ## Parent

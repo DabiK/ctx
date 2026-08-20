@@ -13,11 +13,13 @@ import { MAX_DEPTH, MAX_RESULTS } from "./config.js";
 import type { PlatformPorts } from "./application/ports.js";
 import { DoctorUseCase } from "./application/doctor.js";
 import { DiscoveryUseCase } from "./application/discovery.js";
+import { GitUseCase } from "./application/git.js";
 import { InitUseCase } from "./application/init.js";
 import { PromptUseCase } from "./application/prompt.js";
 import { ReadUseCase } from "./application/read.js";
 import { RequestUseCase } from "./application/request.js";
 import { SearchUseCase } from "./application/search.js";
+import { isSafeRevision, isSafeShowPath } from "./protocol.js";
 import { SystemClipboard } from "./platform/clipboard.js";
 import { SystemEnv } from "./platform/env.js";
 import { SystemFs } from "./platform/fs.js";
@@ -39,7 +41,12 @@ type Command =
   | "tree"
   | "glob"
   | "inspect"
-  | "search";
+  | "search"
+  | "status"
+  | "changed"
+  | "diff"
+  | "log"
+  | "show";
 
 interface ParsedArgs {
   command: Command | null;
@@ -49,6 +56,7 @@ interface ParsedArgs {
   compact: boolean;
   copy: boolean;
   allowSensitive: boolean;
+  staged: boolean;
   depth: number | null;
   limit: number | null;
   args: string[];
@@ -71,6 +79,11 @@ function usage(): string {
     `  glob      List repository files matching a pattern.`,
     `  inspect   Print a bounded tree plus principal files and module metadata.`,
     `  search    Search repository content (ripgrep, findstr fallback).`,
+    `  status    Print branch and staged/modified/untracked/deleted files.`,
+    `  changed   Print the changed-file list (optionally scoped to a path).`,
+    `  diff      Print the working-tree or staged diff (optionally scoped).`,
+    `  log       Print recent commits (optionally scoped to a path).`,
+    `  show      Print one file's content at a revision (git show rev:path).`,
     `  read      Execute the @ctx request in the clipboard and copy the response back.`,
     `  help      Show this help.`,
     ``,
@@ -79,8 +92,9 @@ function usage(): string {
     `  -v, --version        Print the version.`,
     `  -c, --copy           Copy the protocol response to the clipboard (file/files/tree/glob/inspect/search).`,
     `  -s, --allow-sensitive  Permit sensitive path/content disclosure for this run.`,
+    `  --staged             Show the staged diff (diff).`,
     `  --depth N            Tree depth (1-${MAX_DEPTH}, tree/inspect).`,
-    `  --limit N            Result limit (1-${MAX_RESULTS}, glob/search).`,
+    `  --limit N            Result limit (1-${MAX_RESULTS}, glob/search/log).`,
     ``,
     `Run \`${EXECUTABLE_NAME} <command> --help\` for command-specific help.`,
   ].join("\n");
@@ -206,6 +220,66 @@ function commandHelp(command: Command): string {
         `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
         `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
       ].join("\n");
+    case "status":
+      return [
+        `Usage: ${EXECUTABLE_NAME} status [--copy] [--allow-sensitive]`,
+        ``,
+        `Print the current branch and changed files bucketed into staged, modified,`,
+        `untracked, and deleted. Read-only Git context.`,
+        ``,
+        `Options:`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "changed":
+      return [
+        `Usage: ${EXECUTABLE_NAME} changed [path] [--copy] [--allow-sensitive]`,
+        ``,
+        `Print the flat changed-file list with each file's state bucket. With an`,
+        `optional repository-relative path, only files under that path are listed.`,
+        ``,
+        `Options:`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "diff":
+      return [
+        `Usage: ${EXECUTABLE_NAME} diff [--staged] [path] [--copy] [--allow-sensitive]`,
+        ``,
+        `Print the working-tree diff (or the staged diff with --staged), optionally`,
+        `scoped to a repository-relative path, with file/insertion/deletion counts.`,
+        ``,
+        `Options:`,
+        `  --staged            Show the staged diff instead of the working tree.`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "log":
+      return [
+        `Usage: ${EXECUTABLE_NAME} log [path] [--limit N] [--copy] [--allow-sensitive]`,
+        ``,
+        `Print recent commits (short hash, date, subject), bounded by --limit or`,
+        `the configured max_results. With an optional repository-relative path,`,
+        `only commits touching that path are listed.`,
+        ``,
+        `Options:`,
+        `  --limit N           Max commits (1-${MAX_RESULTS}, overrides max_results).`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "show":
+      return [
+        `Usage: ${EXECUTABLE_NAME} show <rev> <path> [--copy] [--allow-sensitive]`,
+        ``,
+        `Print the content of <path> at revision <rev> (git show rev:path), read`,
+        `from the object store. Revisions are restricted to HEAD (with ~N/^N),`,
+        `hex commit hashes, and plain branch/tag names; paths must be`,
+        `repository-relative and free of traversal and :/% characters.`,
+        ``,
+        `Options:`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
   }
 }
 
@@ -222,6 +296,7 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
     compact: false,
     copy: false,
     allowSensitive: false,
+    staged: false,
     depth: null,
     limit: null,
     args: [],
@@ -242,6 +317,8 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
       parsed.copy = true;
     } else if (arg === "--allow-sensitive" || arg === "-s") {
       parsed.allowSensitive = true;
+    } else if (arg === "--staged") {
+      parsed.staged = true;
     } else if (arg === "--depth" || arg === "--limit") {
       const value = argv[i + 1];
       if (value === undefined) {
@@ -285,6 +362,11 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
     command !== "glob" &&
     command !== "inspect" &&
     command !== "search" &&
+    command !== "status" &&
+    command !== "changed" &&
+    command !== "diff" &&
+    command !== "log" &&
+    command !== "show" &&
     command !== "help"
   ) {
     return { error: `Unknown command: ${command}` };
@@ -316,12 +398,43 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
   if (command === "search" && parsed.args.length === 0) {
     return { error: `search requires at least one query term` };
   }
+  if (command === "changed" && parsed.args.length > 1) {
+    return { error: `changed accepts at most one path (got ${parsed.args.length})` };
+  }
+  if (command === "diff" && parsed.args.length > 1) {
+    return { error: `diff accepts at most one path (got ${parsed.args.length})` };
+  }
+  if (command === "log" && parsed.args.length > 1) {
+    return { error: `log accepts at most one path (got ${parsed.args.length})` };
+  }
+  if (command === "show") {
+    if (parsed.args.length !== 2) {
+      return { error: `show requires exactly <rev> and <path> (got ${parsed.args.length})` };
+    }
+    const rev = parsed.args[0] ?? "";
+    const path = parsed.args[1] ?? "";
+    if (!isSafeRevision(rev)) {
+      return {
+        error:
+          `unsafe revision \`${rev}\` — show accepts only HEAD (with ~N/^N), ` +
+          `hex commit hashes, or plain branch/tag names`,
+      };
+    }
+    if (!isSafeShowPath(path)) {
+      return {
+        error:
+          `unsafe path \`${path}\` — show paths must be repository-relative ` +
+          `and free of traversal and \`:\`/\`%\` characters`,
+      };
+    }
+  }
   if (
     (command === "init" ||
       command === "prompt" ||
       command === "doctor" ||
       command === "read" ||
-      command === "tree") &&
+      command === "tree" ||
+      command === "status") &&
     parsed.args.length > 0
   ) {
     return { error: `Unexpected argument: ${parsed.args[0]}` };
@@ -406,6 +519,47 @@ export async function runCli(argv: string[], ports: PlatformPorts): Promise<numb
     }
     case "search":
       return runSearch(ports, parsed);
+    case "status": {
+      const gitOps = new GitUseCase(clipboard, terminal, git, fs);
+      return gitOps.status({
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+      });
+    }
+    case "changed": {
+      const gitOps = new GitUseCase(clipboard, terminal, git, fs);
+      return gitOps.changed(parsed.args[0] ?? null, {
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+      });
+    }
+    case "diff": {
+      const gitOps = new GitUseCase(clipboard, terminal, git, fs);
+      return gitOps.diff(parsed.args[0] ?? null, parsed.staged, {
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+      });
+    }
+    case "log": {
+      const gitOps = new GitUseCase(clipboard, terminal, git, fs);
+      return gitOps.log(parsed.args[0] ?? null, {
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+        limit: parsed.limit,
+      });
+    }
+    case "show": {
+      const gitOps = new GitUseCase(clipboard, terminal, git, fs);
+      return gitOps.show(parsed.args[0] ?? "", parsed.args[1] ?? "", {
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+      });
+    }
     case "read":
       return runRead(ports, parsed);
   }

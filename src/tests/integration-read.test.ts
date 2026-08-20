@@ -16,7 +16,7 @@ import { ReadUseCase } from "../application/read.js";
 import { RequestUseCase } from "../application/request.js";
 import { SystemFs } from "../platform/fs.js";
 import { SystemGit } from "../platform/git.js";
-import { FakeClipboard, FakeTerminal } from "./fakes.js";
+import { FakeClipboard, FakeSearch, FakeTerminal } from "./fakes.js";
 
 /** Real SystemFs pinned to a directory so git root discovery targets the repo. */
 class RepoFs extends SystemFs {
@@ -62,7 +62,7 @@ describe("integration: safe clipboard file context", () => {
     seed(".ctxignore", "dist/\n");
     clipboard.content = "@ctx file src/app.ts:2-3";
 
-    const code = await new RequestUseCase(clipboard, terminal, git, fs).read({
+    const code = await new RequestUseCase(clipboard, terminal, git, fs, new FakeSearch()).read({
       allowSensitive: false,
     });
 
@@ -125,7 +125,7 @@ describe("integration: safe clipboard file context", () => {
     seed(".ctx.toml", 'sensitive_paths = ["creds.json"]\n');
     clipboard.content = "@ctx files dist/bundle.js creds.json src/missing.ts";
 
-    const code = await new RequestUseCase(clipboard, terminal, git, fs).read({
+    const code = await new RequestUseCase(clipboard, terminal, git, fs, new FakeSearch()).read({
       allowSensitive: false,
     });
 

@@ -102,10 +102,86 @@ describe("parseRequestText", () => {
   });
 
   it("refuses unsupported operations with a structured reason", () => {
-    const r = parseRequestText("@ctx tree --depth 2");
+    const r = parseRequestText("@ctx status");
     assert.ok(!r.ok);
     if (!r.ok) {
-      assert.ok(r.reason.includes("unsupported operation `tree`"));
+      assert.ok(r.reason.includes("unsupported operation `status`"));
+    }
+    const b = parseRequestText("@ctx batch read a.ts");
+    assert.ok(!b.ok);
+    if (!b.ok) {
+      assert.ok(b.reason.includes("unsupported operation `batch`"));
+    }
+  });
+
+  it("parses tree with an optional --depth", () => {
+    const plain = parseRequestText("@ctx tree");
+    assert.ok(plain.ok);
+    if (plain.ok) {
+      assert.deepEqual(plain.ops, [{ kind: "tree", depth: null }]);
+    }
+    const withDepth = parseRequestText("@ctx tree --depth 5");
+    assert.ok(withDepth.ok);
+    if (withDepth.ok) {
+      assert.deepEqual(withDepth.ops, [{ kind: "tree", depth: 5 }]);
+    }
+  });
+
+  it("rejects malformed tree requests", () => {
+    assert.ok(!parseRequestText("@ctx tree --depth").ok);
+    assert.ok(!parseRequestText("@ctx tree --depth 0").ok);
+    assert.ok(!parseRequestText("@ctx tree --depth 11").ok);
+    assert.ok(!parseRequestText("@ctx tree --depth abc").ok);
+    assert.ok(!parseRequestText("@ctx tree src/").ok);
+  });
+
+  it("parses glob, inspect, and search requests", () => {
+    const glob = parseRequestText("@ctx glob src/**/*.ts");
+    assert.ok(glob.ok);
+    if (glob.ok) {
+      assert.deepEqual(glob.ops, [{ kind: "glob", pattern: "src/**/*.ts" }]);
+    }
+
+    const inspectRoot = parseRequestText("@ctx inspect");
+    assert.ok(inspectRoot.ok);
+    if (inspectRoot.ok) {
+      assert.deepEqual(inspectRoot.ops, [{ kind: "inspect", path: null }]);
+    }
+    const inspectPath = parseRequestText("@ctx inspect docs");
+    assert.ok(inspectPath.ok);
+    if (inspectPath.ok) {
+      assert.deepEqual(inspectPath.ops, [{ kind: "inspect", path: "docs" }]);
+    }
+
+    const search = parseRequestText("@ctx search TODO fix");
+    assert.ok(search.ok);
+    if (search.ok) {
+      assert.deepEqual(search.ops, [{ kind: "search", query: "TODO fix" }]);
+    }
+    const quoted = parseRequestText('@ctx search "foo bar"');
+    assert.ok(quoted.ok);
+    if (quoted.ok) {
+      assert.deepEqual(quoted.ops, [{ kind: "search", query: "foo bar" }]);
+    }
+  });
+
+  it("rejects malformed glob, inspect, and search requests", () => {
+    assert.ok(!parseRequestText("@ctx glob").ok);
+    assert.ok(!parseRequestText("@ctx glob a b").ok);
+    assert.ok(!parseRequestText("@ctx inspect a b").ok);
+    assert.ok(!parseRequestText("@ctx search").ok);
+    assert.ok(!parseRequestText('@ctx search ""').ok);
+  });
+
+  it("parses a mixed request with read and discovery operations", () => {
+    const r = parseRequestText(["@ctx file src/app.ts", "@ctx tree --depth 2", "@ctx search TODO"].join("\n"));
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.deepEqual(r.ops, [
+        { kind: "file", specs: ["src/app.ts"] },
+        { kind: "tree", depth: 2 },
+        { kind: "search", query: "TODO" },
+      ]);
     }
   });
 

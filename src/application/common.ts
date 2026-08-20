@@ -8,6 +8,7 @@
 import { PRODUCT_NAME, RESPONSE_MARKER } from "../branding.js";
 import { buildCompactPrompt, buildPrompt } from "../prompt.js";
 import type { ClipboardPort, FsPort, GitPort, TerminalPort } from "./ports.js";
+import { buildEnvelope, type ResponsePart } from "./response.js";
 
 export const EXIT_OK = 0;
 export const EXIT_FAILURE = 1;
@@ -125,4 +126,37 @@ export function report(
 ): void {
   const tag = status === "ok" ? "[ok] " : status === "warn" ? "[warn] " : "[fail] ";
   terminal.info(tag + message);
+}
+
+/**
+ * Shared tail of the discovery operations: copy the stable response on demand,
+ * print the block (or a protocol summary line), and compute the exit code.
+ */
+export async function finishDiscoveryOp(
+  exec: { part: ResponsePart; produced: boolean },
+  opts: { copy: boolean; protocol: boolean },
+  clipboard: ClipboardPort,
+  terminal: TerminalPort,
+): Promise<number> {
+  if (opts.copy) {
+    await copyOrThrow(
+      buildEnvelope([`## ${exec.part.title}`, ...exec.part.lines]),
+      clipboard,
+      terminal,
+    );
+  }
+  if (opts.protocol) {
+    terminal.info(
+      `${PRODUCT_NAME}: processed request — "${exec.part.title}" completed; ` +
+        `${RESPONSE_MARKER} copied to the clipboard.`,
+    );
+  } else {
+    for (const line of exec.part.lines) {
+      terminal.info(line);
+    }
+    if (opts.copy) {
+      terminal.info(`Protocol response (${RESPONSE_MARKER}) copied to the clipboard.`);
+    }
+  }
+  return exec.produced ? EXIT_OK : EXIT_FAILURE;
 }

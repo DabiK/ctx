@@ -26,6 +26,24 @@ describe("parseProjectConfig", () => {
     assert.deepEqual(config.sensitivePaths, [".env", "secrets/"]);
   });
 
+  it("parses the discovery limits tree_depth, inspect_depth, and max_results", () => {
+    const config = parseProjectConfig(
+      ["tree_depth = 5", "inspect_depth = 2", "max_results = 250"].join("\n"),
+    );
+    assert.equal(config.treeDepth, 5);
+    assert.equal(config.inspectDepth, 2);
+    assert.equal(config.maxResults, 250);
+  });
+
+  it("keeps the default discovery limits for missing or malformed values", () => {
+    assert.equal(parseProjectConfig(null).treeDepth, DEFAULT_CONFIG.treeDepth);
+    assert.equal(parseProjectConfig(null).inspectDepth, DEFAULT_CONFIG.inspectDepth);
+    assert.equal(parseProjectConfig(null).maxResults, DEFAULT_CONFIG.maxResults);
+    const malformed = parseProjectConfig(["tree_depth = deep", "max_results = many"].join("\n"));
+    assert.equal(malformed.treeDepth, DEFAULT_CONFIG.treeDepth);
+    assert.equal(malformed.maxResults, DEFAULT_CONFIG.maxResults);
+  });
+
   it("defaults line_numbers to true", () => {
     assert.equal(parseProjectConfig("# nothing here\n").lineNumbers, true);
     assert.equal(parseProjectConfig("").lineNumbers, true);

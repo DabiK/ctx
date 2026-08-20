@@ -29,3 +29,37 @@
 - Added hexagonal domain/application modules for protocol parsing, project configuration, ignore matching, sensitive content detection, path guarding, stable responses, and read/request use cases.
 - Extended outbound adapters and fakes for clipboard reads and resolved filesystem boundary checks.
 - Verified `npm run typecheck` and `npm test`: 90 tests pass, including temporary-Git-repository integration coverage.
+
+## 2026-08-20 — #4 Project discovery and search
+
+- Added project discovery through the same boundary and protocol: direct `tree`,
+  `glob`, `inspect`, and `search` commands plus the corresponding `@ctx` ops.
+- `DiscoveryUseCase` (tree/glob/inspect) walks the repository with the fs port,
+  honouring `.ctxignore`, sensitive paths, allowed roots, and explicit depth and
+  result limits reported as `limited: yes (max N)`; `inspect` returns a bounded
+  tree plus principal files (package.json metadata, README, AGENTS.md, ...) with
+  content truncation notices.
+- `SearchUseCase` delegates to a new `SearchPort` backend (application port):
+  ripgrep when available, findstr on Windows as the Windows-native fallback,
+  and a stub that fails with an actionable message elsewhere. Both backends
+  return raw matches and the use case applies the boundary rules uniformly.
+  Output parsers (`parseRipgrepJson`, `parseFindstrOutput`) are pure and unit
+  tested on any host. Search fetches with 4x headroom so boundary filtering
+  does not starve the visible result limit.
+- Search is now a first-class port in `PlatformPorts`, wired in the CLI adapter
+  via `createSearchPort(env)`; tests inject `FakeSearch`.
+- Protocol parser extended (`tree [--depth N]`, `glob <pattern>`,
+  `inspect [path]`, `search <query>`); requests mixing reads and discovery ops
+  produce one combined `# CTX RESPONSE` with a section per operation
+  (`buildCombinedResponse`), while read-only requests keep the legacy
+  byte-identical read response. Malformed/unsupported requests still produce a
+  structured refusal listing the supported operations.
+- Config gained `tree_depth`, `inspect_depth`, and `max_results` (with hard caps
+  `MAX_DEPTH`/`MAX_RESULTS`); the `.ctx.toml` template documents them.
+- `PathGuard` grew `guardDir` (for inspect scopes) and `entryAllowed` (file-less
+  ignore/sensitive check for walks); `FsPort` grew `readDir`.
+- Verified `npm run typecheck` and `npm test`: 139 tests pass, including new
+  discovery/search unit suites, parser unit tests, and real-repo integration
+  coverage (tree/glob/inspect always; search via real ripgrep when installed).
+  Manually verified the packaged CLI: tree/glob/inspect/search, `--copy`, a
+  combined `@ctx tree + @ctx search` round trip, and the `@ctx status` refusal.

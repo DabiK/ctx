@@ -4,7 +4,7 @@
  * symlink resolution semantics live here, not in application code.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { FsPort } from "../application/ports.js";
 
@@ -51,6 +51,14 @@ export class SystemFs implements FsPort {
       return statSync(path).isDirectory();
     } catch {
       return false;
+    }
+  }
+
+  readDir(path: string): string[] {
+    try {
+      return readdirSync(path, { encoding: "utf8" });
+    } catch {
+      return [];
     }
   }
 

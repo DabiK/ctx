@@ -59,36 +59,51 @@ export class ReadUseCase {
    * when nothing could be read (all items refused or missing).
    */
   async readSpecs(specs: string[], opts: ReadOptions): Promise<number> {
-    const root = await requireGitRoot(this.git, this.fs, this.terminal);
-    if (root === null) {
+    const collected = await this.collectSpecs(specs, opts.allowSensitive);
+    if (collected === null) {
       return EXIT_FAILURE;
     }
-
-    const config = parseProjectConfig(this.fs.readText(this.fs.join(root, CONFIG_FILE_NAME)));
-    const guard = new PathGuard(root, config, opts.allowSensitive, this.fs);
-
-    const items: ReadResultItem[] = [];
-    for (const spec of specs) {
-      items.push(this.readOne(spec, guard, opts, config.lineNumbers));
-    }
-
-    const readCount = items.filter((i): i is ReadItem => i.kind === "read").length;
-    const response = buildReadResponse(items);
+    const { items } = collected;
 
     if (opts.copy) {
-      await copyOrThrow(response, this.clipboard, this.terminal);
+      await copyOrThrow(buildReadResponse(items), this.clipboard, this.terminal);
     }
 
     this.printTerminal(items, opts);
 
+    const readCount = items.filter((i): i is ReadItem => i.kind === "read").length;
     return readCount === 0 ? EXIT_FAILURE : EXIT_OK;
+  }
+
+  /**
+   * Execute read specs through the permission boundary without copying or
+   * printing. Shared with the request use case so read operations can be
+   * combined with discovery operations in one clipboard response.
+   */
+  async collectSpecs(
+    specs: string[],
+    allowSensitive: boolean,
+  ): Promise<{ items: ReadResultItem[] } | null> {
+    const root = await requireGitRoot(this.git, this.fs, this.terminal);
+    if (root === null) {
+      return null;
+    }
+
+    const config = parseProjectConfig(this.fs.readText(this.fs.join(root, CONFIG_FILE_NAME)));
+    const guard = new PathGuard(root, config, allowSensitive, this.fs);
+
+    const items: ReadResultItem[] = [];
+    for (const spec of specs) {
+      items.push(this.readOne(spec, guard, allowSensitive, config.lineNumbers));
+    }
+    return { items };
   }
 
   /** Read one spec through the guard, producing a read or omitted item. */
   private readOne(
     spec: string,
     guard: PathGuard,
-    opts: ReadOptions,
+    allowSensitive: boolean,
     lineNumbers: boolean,
   ): ReadResultItem {
     const parsed = parsePathSpec(spec);
@@ -104,7 +119,7 @@ export class ReadUseCase {
     if (content === null) {
       return { kind: "omitted", relPath: parsed.path, reason: "unreadable file" };
     }
-    if (!opts.allowSensitive && containsSensitiveContent(content)) {
+    if (!allowSensitive && containsSensitiveContent(content)) {
       return {
         kind: "omitted",
         relPath: parsed.path,

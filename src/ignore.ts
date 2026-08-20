@@ -77,7 +77,7 @@ function buildPatternRegex(pattern: string): RegExp {
 }
 
 /** Convert `*`, `?`, and `**` glob syntax to a regex source fragment. */
-function globToRegexSource(pattern: string): string {
+export function globToRegexSource(pattern: string): string {
   let out = "";
   let i = 0;
   while (i < pattern.length) {

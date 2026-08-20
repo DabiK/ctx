@@ -56,7 +56,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #2 Bootstrap CLI, init, prompt and doctor.
   >
 
-- [ ] #4 — Project discovery and search (labels: ready-for-agent)
+- [x] #4 — Project discovery and search (labels: ready-for-agent)
 
   **Issue #4 — détail complet**
   > ## Parent

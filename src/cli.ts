@@ -9,23 +9,37 @@
  */
 
 import { EXECUTABLE_NAME, PRODUCT_NAME, VERSION } from "./branding.js";
+import { MAX_DEPTH, MAX_RESULTS } from "./config.js";
 import type { PlatformPorts } from "./application/ports.js";
 import { DoctorUseCase } from "./application/doctor.js";
+import { DiscoveryUseCase } from "./application/discovery.js";
 import { InitUseCase } from "./application/init.js";
 import { PromptUseCase } from "./application/prompt.js";
 import { ReadUseCase } from "./application/read.js";
 import { RequestUseCase } from "./application/request.js";
+import { SearchUseCase } from "./application/search.js";
 import { SystemClipboard } from "./platform/clipboard.js";
 import { SystemEnv } from "./platform/env.js";
 import { SystemFs } from "./platform/fs.js";
 import { SystemGit } from "./platform/git.js";
+import { createSearchPort } from "./platform/search.js";
 import { SystemTerminal } from "./platform/terminal.js";
 
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
 const EXIT_USAGE = 2;
 
-type Command = "init" | "prompt" | "doctor" | "file" | "files" | "read";
+type Command =
+  | "init"
+  | "prompt"
+  | "doctor"
+  | "file"
+  | "files"
+  | "read"
+  | "tree"
+  | "glob"
+  | "inspect"
+  | "search";
 
 interface ParsedArgs {
   command: Command | null;
@@ -35,6 +49,8 @@ interface ParsedArgs {
   compact: boolean;
   copy: boolean;
   allowSensitive: boolean;
+  depth: number | null;
+  limit: number | null;
   args: string[];
 }
 
@@ -51,14 +67,20 @@ function usage(): string {
     `  doctor    Report Git, clipboard, configuration, and search readiness.`,
     `  file      Read one repository file, optionally a bounded line range.`,
     `  files     Read several repository files in one response.`,
+    `  tree      Print a bounded directory tree.`,
+    `  glob      List repository files matching a pattern.`,
+    `  inspect   Print a bounded tree plus principal files and module metadata.`,
+    `  search    Search repository content (ripgrep, findstr fallback).`,
     `  read      Execute the @ctx request in the clipboard and copy the response back.`,
     `  help      Show this help.`,
     ``,
     `Options:`,
     `  -h, --help           Show help for a command or the whole CLI.`,
     `  -v, --version        Print the version.`,
-    `  -c, --copy           Copy the protocol response to the clipboard (file/files).`,
+    `  -c, --copy           Copy the protocol response to the clipboard (file/files/tree/glob/inspect/search).`,
     `  -s, --allow-sensitive  Permit sensitive path/content disclosure for this run.`,
+    `  --depth N            Tree depth (1-${MAX_DEPTH}, tree/inspect).`,
+    `  --limit N            Result limit (1-${MAX_RESULTS}, glob/search).`,
     ``,
     `Run \`${EXECUTABLE_NAME} <command> --help\` for command-specific help.`,
   ].join("\n");
@@ -127,11 +149,61 @@ function commandHelp(command: Command): string {
       return [
         `Usage: ${EXECUTABLE_NAME} read [--allow-sensitive]`,
         ``,
-        `Execute the @ctx request found in the clipboard (this build: file and`,
-        `files) and copy the stable protocol response back. Malformed or`,
-        `unsupported requests produce a structured refusal response.`,
+        `Execute the @ctx request found in the clipboard (this build: file, files,`,
+        `tree, glob, inspect, and search) and copy the stable protocol response back.`,
+        `Malformed or unsupported requests produce a structured refusal response.`,
         ``,
         `Options:`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "tree":
+      return [
+        `Usage: ${EXECUTABLE_NAME} tree [--depth N] [--copy] [--allow-sensitive]`,
+        ``,
+        `Print a bounded directory tree from the repository root. Depth and entry`,
+        `limits come from the project configuration (tree_depth, max_results) and`,
+        `are reported explicitly when hit.`,
+        ``,
+        `Options:`,
+        `  --depth N           Tree depth (1-${MAX_DEPTH}, overrides tree_depth).`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "glob":
+      return [
+        `Usage: ${EXECUTABLE_NAME} glob <pattern> [--limit N] [--copy] [--allow-sensitive]`,
+        ``,
+        `List repository files matching a gitignore-style glob (e.g. \`src/**/*.ts\`,`,
+        `\`*.md\`). Ignored and sensitive paths are never listed.`,
+        ``,
+        `Options:`,
+        `  --limit N           Max matches (1-${MAX_RESULTS}, overrides max_results).`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "inspect":
+      return [
+        `Usage: ${EXECUTABLE_NAME} inspect [path] [--depth N] [--copy] [--allow-sensitive]`,
+        ``,
+        `Print a bounded directory tree (default depth 2) plus the repo-root`,
+        `principal files (package.json metadata, README, AGENTS.md, ...). With an`,
+        `optional repository-relative path, the tree is scoped to that directory.`,
+        ``,
+        `Options:`,
+        `  --depth N           Tree depth (1-${MAX_DEPTH}, overrides inspect_depth).`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
+        `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
+      ].join("\n");
+    case "search":
+      return [
+        `Usage: ${EXECUTABLE_NAME} search <query>... [--limit N] [--copy] [--allow-sensitive]`,
+        ``,
+        `Search repository content with ripgrep when available (findstr on Windows`,
+        `otherwise). Results honour .ctxignore, allowed roots, and sensitive rules.`,
+        ``,
+        `Options:`,
+        `  --limit N           Max matches (1-${MAX_RESULTS}, overrides max_results).`,
+        `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
         `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
       ].join("\n");
   }
@@ -150,11 +222,14 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
     compact: false,
     copy: false,
     allowSensitive: false,
+    depth: null,
+    limit: null,
     args: [],
   };
   const positional: string[] = [];
 
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] ?? "";
     if (arg === "--help" || arg === "-h") {
       parsed.help = true;
     } else if (arg === "--version" || arg === "-v") {
@@ -167,6 +242,27 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
       parsed.copy = true;
     } else if (arg === "--allow-sensitive" || arg === "-s") {
       parsed.allowSensitive = true;
+    } else if (arg === "--depth" || arg === "--limit") {
+      const value = argv[i + 1];
+      if (value === undefined) {
+        return { error: `${arg} requires a value` };
+      }
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1) {
+        return { error: `${arg} requires a positive integer (got \`${value}\`)` };
+      }
+      if (arg === "--depth") {
+        if (n > MAX_DEPTH) {
+          return { error: `--depth must be between 1 and ${MAX_DEPTH}` };
+        }
+        parsed.depth = n;
+      } else {
+        if (n > MAX_RESULTS) {
+          return { error: `--limit must be between 1 and ${MAX_RESULTS}` };
+        }
+        parsed.limit = n;
+      }
+      i++;
     } else if (arg.startsWith("-")) {
       return { error: `Unknown option: ${arg}` };
     } else {
@@ -185,6 +281,10 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
     command !== "file" &&
     command !== "files" &&
     command !== "read" &&
+    command !== "tree" &&
+    command !== "glob" &&
+    command !== "inspect" &&
+    command !== "search" &&
     command !== "help"
   ) {
     return { error: `Unknown command: ${command}` };
@@ -207,11 +307,21 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
   if (command === "files" && parsed.args.length === 0) {
     return { error: `files requires at least one path` };
   }
+  if (command === "glob" && parsed.args.length !== 1) {
+    return { error: `glob requires exactly one pattern (got ${parsed.args.length})` };
+  }
+  if (command === "inspect" && parsed.args.length > 1) {
+    return { error: `inspect accepts at most one path (got ${parsed.args.length})` };
+  }
+  if (command === "search" && parsed.args.length === 0) {
+    return { error: `search requires at least one query term` };
+  }
   if (
     (command === "init" ||
       command === "prompt" ||
       command === "doctor" ||
-      command === "read") &&
+      command === "read" ||
+      command === "tree") &&
     parsed.args.length > 0
   ) {
     return { error: `Unexpected argument: ${parsed.args[0]}` };
@@ -268,11 +378,62 @@ export async function runCli(argv: string[], ports: PlatformPorts): Promise<numb
         protocol: false,
       });
     }
-    case "read":
-      return new RequestUseCase(clipboard, terminal, git, fs).read({
+    case "tree": {
+      const discovery = new DiscoveryUseCase(clipboard, terminal, git, fs);
+      return discovery.tree(parsed.depth, {
+        copy: parsed.copy,
         allowSensitive: parsed.allowSensitive,
+        protocol: false,
       });
+    }
+    case "glob": {
+      const discovery = new DiscoveryUseCase(clipboard, terminal, git, fs);
+      return discovery.glob(parsed.args[0] ?? "", {
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+        limit: parsed.limit,
+      });
+    }
+    case "inspect": {
+      const discovery = new DiscoveryUseCase(clipboard, terminal, git, fs);
+      return discovery.inspect(parsed.args[0] ?? null, {
+        copy: parsed.copy,
+        allowSensitive: parsed.allowSensitive,
+        protocol: false,
+        depth: parsed.depth,
+      });
+    }
+    case "search":
+      return runSearch(ports, parsed);
+    case "read":
+      return runRead(ports, parsed);
   }
+}
+
+/** Run `ctx search`, using the wired search backend (ripgrep or findstr). */
+async function runSearch(
+  ports: PlatformPorts,
+  parsed: ParsedArgs,
+): Promise<number> {
+  const { clipboard, terminal, git, fs, search } = ports;
+  return new SearchUseCase(clipboard, terminal, git, fs, search).search(
+    parsed.args.join(" "),
+    {
+      copy: parsed.copy,
+      allowSensitive: parsed.allowSensitive,
+      protocol: false,
+      limit: parsed.limit,
+    },
+  );
+}
+
+/** Run `ctx read`, using the wired search backend for discovery operations. */
+async function runRead(ports: PlatformPorts, parsed: ParsedArgs): Promise<number> {
+  const { clipboard, terminal, git, fs, search } = ports;
+  return new RequestUseCase(clipboard, terminal, git, fs, search).read({
+    allowSensitive: parsed.allowSensitive,
+  });
 }
 
 /** Wire the real platform ports and run. */
@@ -284,6 +445,7 @@ export async function main(argv: string[]): Promise<number> {
     git: new SystemGit(),
     fs: new SystemFs(),
     env,
+    search: createSearchPort(env),
   };
   return runCli(argv, ports);
 }

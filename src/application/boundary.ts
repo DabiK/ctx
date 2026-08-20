@@ -67,6 +67,44 @@ export class PathGuard {
    * absolute path on success, or a refusal reason without reading content.
    */
   guard(relPath: string): GuardResult {
+    return this.check(relPath, false);
+  }
+
+  /**
+   * Validate one repository-relative directory path (for `inspect` scopes).
+   * Same rules as {@link guard}, but existing directories are accepted.
+   */
+  guardDir(relPath: string): GuardResult {
+    return this.check(relPath, true);
+  }
+
+  /**
+   * Check whether a repository-relative path would be excluded by `.ctxignore`
+   * or sensitive-path rules, without any filesystem access. Used by discovery
+   * walks, which enumerate entries through the filesystem port themselves.
+   */
+  entryAllowed(relPath: string): { ok: true } | { ok: false; reason: string } {
+    const rel = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
+    const ignoredPattern = this.ignoreMatcher.match(rel);
+    if (ignoredPattern !== null) {
+      return {
+        ok: false,
+        reason: `excluded by .ctxignore pattern \`${ignoredPattern}\``,
+      };
+    }
+    if (!this.allowSensitive) {
+      const sensitivePattern = this.sensitiveMatcher.match(rel);
+      if (sensitivePattern !== null) {
+        return {
+          ok: false,
+          reason: "sensitive path — requires an explicit override to disclose",
+        };
+      }
+    }
+    return { ok: true };
+  }
+
+  private check(relPath: string, allowDir: boolean): GuardResult {
     const trimmed = relPath.trim();
     if (trimmed === "") {
       return { ok: false, kind: "refused", reason: "empty path" };
@@ -99,27 +137,13 @@ export class PathGuard {
         reason: "path resolves outside the allowed roots (symlink escaping?)",
       };
     }
-    if (this.fs.isDirectory(resolved)) {
+    if (this.fs.isDirectory(resolved) && !allowDir) {
       return { ok: false, kind: "refused", reason: "is a directory — files only" };
     }
 
-    const ignoredPattern = this.ignoreMatcher.match(rel);
-    if (ignoredPattern !== null) {
-      return {
-        ok: false,
-        kind: "refused",
-        reason: `excluded by .ctxignore pattern \`${ignoredPattern}\``,
-      };
-    }
-    if (!this.allowSensitive) {
-      const sensitivePattern = this.sensitiveMatcher.match(rel);
-      if (sensitivePattern !== null) {
-        return {
-          ok: false,
-          kind: "refused",
-          reason: "sensitive path — requires an explicit override to disclose",
-        };
-      }
+    const entry = this.entryAllowed(rel);
+    if (!entry.ok) {
+      return { ok: false, kind: "refused", reason: entry.reason };
     }
     return { ok: true, kind: "ok", absPath: resolved, relPath: rel };
   }

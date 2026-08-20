@@ -3,10 +3,16 @@
  *
  * A deliberately small line-based reader for the keys ctx uses: `allowed_roots`
  * (absolute external roots ctx may read), `line_numbers` (line numbering for
- * copied content, default true), and `sensitive_paths` (explicit sensitive
- * paths in addition to the built-in defaults). Anything unrecognized or
+ * copied content, default true), `sensitive_paths` (explicit sensitive paths
+ * in addition to the built-in defaults), and the discovery limits
+ * `tree_depth`, `inspect_depth`, and `max_results`. Anything unrecognized or
  * malformed keeps the default; `ctx doctor` is the diagnostic surface.
  */
+
+/** Hard cap on tree/inspect depth so a misconfigured project stays bounded. */
+export const MAX_DEPTH = 10;
+/** Hard cap on per-operation result counts so a misconfigured project stays bounded. */
+export const MAX_RESULTS = 1000;
 
 export interface ProjectConfig {
   /** Absolute directories ctx may read in addition to the repository root. */
@@ -15,12 +21,21 @@ export interface ProjectConfig {
   lineNumbers: boolean;
   /** Sensitive path patterns in addition to the built-in defaults. */
   sensitivePaths: string[];
+  /** Default depth of `ctx tree` (clamped to [1, MAX_DEPTH]). */
+  treeDepth: number;
+  /** Default depth of `ctx inspect` (clamped to [1, MAX_DEPTH]). */
+  inspectDepth: number;
+  /** Default per-operation result limit (clamped to [1, MAX_RESULTS]). */
+  maxResults: number;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
   allowedRoots: [],
   lineNumbers: true,
   sensitivePaths: [],
+  treeDepth: 3,
+  inspectDepth: 2,
+  maxResults: 100,
 };
 
 /** Parse `.ctx.toml` text; `null` (missing file) yields the defaults. */
@@ -29,6 +44,9 @@ export function parseProjectConfig(text: string | null): ProjectConfig {
     allowedRoots: [...DEFAULT_CONFIG.allowedRoots],
     lineNumbers: DEFAULT_CONFIG.lineNumbers,
     sensitivePaths: [...DEFAULT_CONFIG.sensitivePaths],
+    treeDepth: DEFAULT_CONFIG.treeDepth,
+    inspectDepth: DEFAULT_CONFIG.inspectDepth,
+    maxResults: DEFAULT_CONFIG.maxResults,
   };
   if (text === null) {
     return config;
@@ -58,6 +76,21 @@ export function parseProjectConfig(text: string | null): ProjectConfig {
       const parsed = parseBool(value);
       if (parsed !== null) {
         config.lineNumbers = parsed;
+      }
+    } else if (key === "tree_depth") {
+      const parsed = parsePositiveInt(value);
+      if (parsed !== null) {
+        config.treeDepth = parsed;
+      }
+    } else if (key === "inspect_depth") {
+      const parsed = parsePositiveInt(value);
+      if (parsed !== null) {
+        config.inspectDepth = parsed;
+      }
+    } else if (key === "max_results") {
+      const parsed = parsePositiveInt(value);
+      if (parsed !== null) {
+        config.maxResults = parsed;
       }
     }
   }
@@ -98,4 +131,13 @@ function parseBool(value: string): boolean | null {
     return false;
   }
   return null;
+}
+
+/** Parse a positive integer, or `null` when malformed. */
+function parsePositiveInt(value: string): number | null {
+  if (!/^\d+$/.test(value)) {
+    return null;
+  }
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 ? n : null;
 }

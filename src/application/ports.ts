@@ -57,11 +57,41 @@ export interface FsPort {
   realpath(path: string): string | null;
   /** True when `path` is an existing directory. */
   isDirectory(path: string): boolean;
+  /** Names of the entries directly under `path`, or `[]` when missing/unreadable. */
+  readDir(path: string): string[];
   /**
    * True when `child` is `parent` itself or located under it. Both paths are
    * expected to be absolute; platform containment semantics live here.
    */
   isWithin(parent: string, child: string): boolean;
+}
+
+/** One raw content-search match (path, line, and matched line content). */
+export interface SearchMatch {
+  /** Repository-relative path with forward slashes. */
+  relPath: string;
+  /** 1-based line number of the match. */
+  line: number;
+  /** The matched line content, without a trailing newline. */
+  content: string;
+}
+
+/**
+ * Content search backend. ripgrep is the preferred implementation; findstr is
+ * the Windows-native fallback. Backends return raw matches; ignore, allowed
+ * root, and sensitive rules are applied uniformly by the application use case
+ * so both backends obey the same contract.
+ */
+export interface SearchPort {
+  /** Backend name used in response metadata ("ripgrep" | "findstr"). */
+  readonly name: string;
+  /**
+   * Search `roots` (absolute directories) for `query`, returning at most
+   * `limit` raw matches. `relPath` of every match is relative to the first
+   * root. Rejects when the backend cannot run; a "no matches" exit is an
+   * empty result, not an error.
+   */
+  search(query: string, roots: string[], limit: number): Promise<SearchMatch[]>;
 }
 
 /** Environment/OS capabilities. */
@@ -79,4 +109,5 @@ export interface PlatformPorts {
   git: GitPort;
   fs: FsPort;
   env: EnvPort;
+  search: SearchPort;
 }

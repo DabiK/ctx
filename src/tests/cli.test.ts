@@ -22,6 +22,8 @@ describe("parseArgs", () => {
       compact: false,
       copy: false,
       allowSensitive: false,
+      depth: null,
+      limit: null,
       args: [],
     });
   });
@@ -65,6 +67,40 @@ describe("parseArgs", () => {
     assert.ok("error" in parseArgs(["file", "a.ts", "b.ts"]));
     assert.ok("error" in parseArgs(["files"]));
     assert.ok("error" in parseArgs(["read", "extra"]));
+    assert.ok("error" in parseArgs(["glob"]));
+    assert.ok("error" in parseArgs(["glob", "a", "b"]));
+    assert.ok("error" in parseArgs(["inspect", "a", "b"]));
+    assert.ok("error" in parseArgs(["search"]));
+    assert.ok("error" in parseArgs(["tree", "extra"]));
+  });
+
+  it("parses discovery commands and --depth/--limit options", () => {
+    const t = parseArgs(["tree", "--depth", "5", "--copy"]);
+    assert.ok(!("error" in t));
+    assert.equal(t.parsed.command, "tree");
+    assert.equal(t.parsed.depth, 5);
+    assert.equal(t.parsed.copy, true);
+
+    const g = parseArgs(["glob", "src/*.ts", "--limit", "20"]);
+    assert.ok(!("error" in g));
+    assert.equal(g.parsed.command, "glob");
+    assert.equal(g.parsed.limit, 20);
+    assert.deepEqual(g.parsed.args, ["src/*.ts"]);
+
+    const i = parseArgs(["inspect", "docs"]);
+    assert.ok(!("error" in i));
+    assert.equal(i.parsed.command, "inspect");
+    assert.deepEqual(i.parsed.args, ["docs"]);
+
+    const s = parseArgs(["search", "TODO", "fix"]);
+    assert.ok(!("error" in s));
+    assert.equal(s.parsed.command, "search");
+    assert.deepEqual(s.parsed.args, ["TODO", "fix"]);
+
+    assert.ok("error" in parseArgs(["tree", "--depth", "0"]));
+    assert.ok("error" in parseArgs(["tree", "--depth", "11"]));
+    assert.ok("error" in parseArgs(["glob", "--limit", "2000"]));
+    assert.ok("error" in parseArgs(["tree", "--limit"]));
   });
 
   it("treats help as a command and supports --help", () => {
@@ -85,8 +121,19 @@ describe("runCli", () => {
     assert.ok(terminal.infoLines.join("\n").includes("Usage:"));
   });
 
-  it("provides help for init, prompt, doctor, file, files, and read", async () => {
-    for (const cmd of ["init", "prompt", "doctor", "file", "files", "read"]) {
+  it("provides help for init, prompt, doctor, file, files, read, tree, glob, inspect, and search", async () => {
+    for (const cmd of [
+      "init",
+      "prompt",
+      "doctor",
+      "file",
+      "files",
+      "read",
+      "tree",
+      "glob",
+      "inspect",
+      "search",
+    ]) {
       const { ports, terminal } = fakePorts();
       const code = await runCli([cmd, "--help"], ports);
       assert.equal(code, 0);
@@ -176,5 +223,55 @@ describe("runCli", () => {
     assert.equal(code, 0);
     assert.ok((clipboard.lastCopied() ?? "").includes(RESPONSE_MARKER));
     assert.ok((clipboard.lastCopied() ?? "").includes("hello ctx"));
+  });
+
+  it("runs tree, glob, and inspect through the CLI", async () => {
+    const { ports, terminal, clipboard, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "app\n");
+    fs.seed("/repo/docs/guide.md", "guide\n");
+    fs.seed("/repo/package.json", JSON.stringify({ name: "demo", version: "1.0.0" }));
+
+    const treeCode = await runCli(["tree", "--depth", "2"], ports);
+    assert.equal(treeCode, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("src/"));
+    assert.ok(terminal.infoLines.join("\n").includes("app.ts"));
+    assert.equal(clipboard.lastCopied(), null, "no copy without --copy");
+
+    const globCode = await runCli(["glob", "**/*.md"], ports);
+    assert.equal(globCode, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("- docs/guide.md"));
+
+    const inspectCode = await runCli(["inspect"], ports);
+    assert.equal(inspectCode, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("name: demo"));
+
+    await runCli(["tree", "--copy"], ports);
+    assert.ok((clipboard.lastCopied() ?? "").includes(RESPONSE_MARKER));
+  });
+
+  it("runs search through the CLI with a fake search backend", async () => {
+    const { ports, terminal, clipboard, fs, search } = fakePorts();
+    fs.seed("/repo/src/app.ts", "alpha\n");
+    search.matches = [{ relPath: "src/app.ts", line: 1, content: "alpha" }];
+
+    const code = await runCli(["search", "alpha", "--copy"], ports);
+
+    assert.equal(code, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("- src/app.ts:1 | alpha"));
+    assert.ok((clipboard.lastCopied() ?? "").includes(RESPONSE_MARKER));
+  });
+
+  it("runs a combined discovery request through the CLI read command", async () => {
+    const { ports, clipboard, fs, search } = fakePorts();
+    fs.seed("/repo/src/app.ts", "alpha\n");
+    search.matches = [{ relPath: "src/app.ts", line: 1, content: "alpha" }];
+    clipboard.content = ["@ctx tree --depth 1", "@ctx search alpha"].join("\n");
+
+    const code = await runCli(["read"], ports);
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Tree (depth 1"));
+    assert.ok(copied.includes("## Search \"alpha\" (fake)"));
   });
 });

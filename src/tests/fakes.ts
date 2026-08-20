@@ -9,6 +9,8 @@ import type {
   FsPort,
   GitPort,
   PlatformPorts,
+  SearchMatch,
+  SearchPort,
   TerminalPort,
 } from "../application/ports.js";
 
@@ -112,6 +114,28 @@ export class FakeFs implements FsPort {
     return this.dirs.has(path);
   }
 
+  readDir(path: string): string[] {
+    const base = path === "/" ? "/" : path.replace(/\/$/, "") + "/";
+    const names = new Set<string>();
+    for (const key of this.files.keys()) {
+      if (key.startsWith(base)) {
+        const name = key.slice(base.length).split("/")[0];
+        if (name !== undefined && name !== "") {
+          names.add(name);
+        }
+      }
+    }
+    for (const key of this.dirs.keys()) {
+      if (key.startsWith(base)) {
+        const name = key.slice(base.length).split("/")[0];
+        if (name !== undefined && name !== "") {
+          names.add(name);
+        }
+      }
+    }
+    return [...names];
+  }
+
   isWithin(parent: string, child: string): boolean {
     const base = parent === "/" ? "/" : parent.replace(/\/$/, "");
     return child === base || child.startsWith(base + "/");
@@ -163,6 +187,24 @@ export class FakeEnv implements EnvPort {
   }
 }
 
+/** In-memory search backend used by tests. */
+export class FakeSearch implements SearchPort {
+  readonly name = "fake";
+  matches: SearchMatch[] = [];
+  failWith: Error | null = null;
+  lastQuery = "";
+  lastLimit = 0;
+
+  async search(query: string, _roots: string[], limit: number): Promise<SearchMatch[]> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    this.lastQuery = query;
+    this.lastLimit = limit;
+    return this.matches.slice(0, limit);
+  }
+}
+
 /** Build a full fake port bundle with defaults. */
 export function fakePorts(overrides: Partial<{
   clipboard: FakeClipboard;
@@ -170,6 +212,7 @@ export function fakePorts(overrides: Partial<{
   git: FakeGit;
   fs: FakeFs;
   env: FakeEnv;
+  search: FakeSearch;
 }> = {}): {
   ports: PlatformPorts;
   clipboard: FakeClipboard;
@@ -177,18 +220,21 @@ export function fakePorts(overrides: Partial<{
   git: FakeGit;
   fs: FakeFs;
   env: FakeEnv;
+  search: FakeSearch;
 } {
   const clipboard = overrides.clipboard ?? new FakeClipboard();
   const terminal = overrides.terminal ?? new FakeTerminal();
   const git = overrides.git ?? new FakeGit();
   const fs = overrides.fs ?? new FakeFs();
   const env = overrides.env ?? new FakeEnv();
+  const search = overrides.search ?? new FakeSearch();
   return {
-    ports: { clipboard, terminal, git, fs, env },
+    ports: { clipboard, terminal, git, fs, env, search },
     clipboard,
     terminal,
     git,
     fs,
     env,
+    search,
   };
 }

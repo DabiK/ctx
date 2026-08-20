@@ -24,6 +24,11 @@ export function buildConfigTemplate(): string {
     `# Explicitly configured sensitive paths: never copied or written without an`,
     `# explicit override, regardless of ignore rules.`,
     `# sensitive_paths = [".env", "secrets/"]`,
+    ``,
+    `# Discovery limits (bounds on outbound context, all optional):`,
+    `# tree_depth = 3        # depth of \`tree\` (1-10)`,
+    `# inspect_depth = 2     # depth of the tree inside \`inspect\` (1-10)`,
+    `# max_results = 100     # per-operation result cap for tree/glob/inspect/search (1-1000)`,
   ].join("\n") + "\n";
 }
 

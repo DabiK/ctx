@@ -41,3 +41,17 @@ of a blind-chat conversation without agent filesystem access.
   verification read.
 - Test the same raw responses through `ctx watch` in safe and yolo modes.
 - Turn each confirmed friction into a regression test before release.
+
+## Completion attempt
+
+The valid blind agent completed `inspect` and requested the three source files
+through a batch. The batch executed successfully. After receiving that real
+multi-file CTX response, however, the OpenCode session returned an empty model
+turn twice; a fresh continuation given the same response also returned empty.
+A minimal fresh-session health check still returned `QA_OK`, which isolates the
+failure to the multi-file context handoff rather than the model/provider.
+
+The moderate feature therefore was not applied. This is a release-blocking QA
+friction: ctx needs a reproducible raw-transcript fixture for multi-file
+responses and a diagnosis of why this OpenCode configuration stops responding
+after that handoff.

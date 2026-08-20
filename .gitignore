@@ -1,0 +1,5 @@
+# Local state and logs of the autonomous Ralph loop.
+.ralph-approved
+.ralph-reviews.log
+.ralph-run.log
+.ralph-stop

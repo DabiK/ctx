@@ -104,6 +104,21 @@ export class PathGuard {
     return { ok: true };
   }
 
+  /**
+   * True when the fully resolved target of the absolute `absPath` lies inside
+   * one of the allowed roots. Discovery walks validate every entry they
+   * enumerate so symlinked directories (or files) escaping the repository or
+   * configured allowed roots are skipped before their names can be disclosed.
+   * Unresolvable (broken) entries fail closed.
+   */
+  resolvedWithinRoots(absPath: string): boolean {
+    const resolved = this.fs.realpath(absPath);
+    if (resolved === null) {
+      return false;
+    }
+    return this.allowedRoots.some((allowed) => this.fs.isWithin(allowed, resolved));
+  }
+
   private check(relPath: string, allowDir: boolean): GuardResult {
     const trimmed = relPath.trim();
     if (trimmed === "") {

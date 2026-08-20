@@ -3,8 +3,10 @@
  *
  * Project discovery through the repository permission boundary. All three
  * operations walk the repository with the filesystem port, honouring the same
- * `.ctxignore`, sensitive-path, and allowed-root rules as file reads, and
- * report limits explicitly instead of pretending the result is complete.
+ * `.ctxignore`, sensitive-path, and allowed-root rules as file reads
+ * (including resolved-link validation: entries whose symlinks escape the
+ * allowed roots are skipped), and report limits explicitly instead of
+ * pretending the result is complete.
  * Direct commands print the sections to the terminal and copy the stable
  * protocol response only with `--copy`; protocol-driven requests collect the
  * rendered blocks for a combined response.
@@ -215,6 +217,14 @@ export class DiscoveryUseCase {
           excluded++;
           continue;
         }
+        // Resolved-link boundary: entries whose symlink target lies outside
+        // the allowed roots (e.g. a directory symlink pointing out of the
+        // repository) are skipped before listing or recursing, so the walk
+        // can never disclose external directory or file names.
+        if (!ctx.guard.resolvedWithinRoots(abs)) {
+          excluded++;
+          continue;
+        }
         const isDir = this.fs.isDirectory(abs);
         lines.push("  ".repeat(depth - 1) + name + (isDir ? "/" : ""));
         entryCount++;
@@ -251,6 +261,13 @@ export class DiscoveryUseCase {
         const abs = this.fs.join(absDir, name);
         const rel = relDir === "" ? name : `${relDir}/${name}`;
         if (!ctx.guard.entryAllowed(rel).ok) {
+          excluded++;
+          continue;
+        }
+        // Resolved-link boundary: skip entries (directories and files) whose
+        // symlink target lies outside the allowed roots before their names
+        // can be matched or recursed into.
+        if (!ctx.guard.resolvedWithinRoots(abs)) {
           excluded++;
           continue;
         }

@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -150,5 +150,67 @@ describe("integration: project discovery and search", () => {
 
     assert.equal(code, 0);
     assert.ok((clipboard.lastCopied() ?? "").includes("- src/app.ts:1 | alpha"));
+  });
+
+  it("tree and glob with --copy never disclose a directory symlink escaping the root", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "ctx-outside-"));
+    try {
+      seed("src/app.ts", "app\n");
+      writeFileSync(join(outside, "hosts"), "127.0.0.1 localhost\n", "utf8");
+      symlinkSync(outside, join(dir, "etc-link"));
+
+      const treeCode = await discovery().tree(null, {
+        copy: true,
+        allowSensitive: false,
+        protocol: false,
+      });
+      assert.equal(treeCode, 0);
+      const treeCopied = clipboard.lastCopied() ?? "";
+      assert.ok(!treeCopied.includes("etc-link"), "escaping symlink pruned from tree");
+      assert.ok(!treeCopied.includes("hosts"), "external directory contents not disclosed");
+      assert.ok(treeCopied.includes("app.ts"), "in-repo entries still copied");
+
+      const globCode = await discovery().glob("**/*", {
+        copy: true,
+        allowSensitive: false,
+        protocol: false,
+      });
+      assert.equal(globCode, 0);
+      const globCopied = clipboard.lastCopied() ?? "";
+      assert.ok(!globCopied.includes("etc-link"));
+      assert.ok(!globCopied.includes("hosts"));
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("@ctx tree and @ctx glob requests skip directory symlinks escaping the root", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "ctx-outside-"));
+    try {
+      seed("src/app.ts", "app\n");
+      writeFileSync(join(outside, "hosts"), "127.0.0.1 localhost\n", "utf8");
+      symlinkSync(outside, join(dir, "etc-link"));
+
+      clipboard.content = "@ctx tree";
+      const treeCode = await new RequestUseCase(clipboard, terminal, git, fs, new FakeSearch()).read({
+        allowSensitive: false,
+      });
+      assert.equal(treeCode, 0);
+      const treeCopied = clipboard.lastCopied() ?? "";
+      assert.ok(!treeCopied.includes("etc-link"));
+      assert.ok(!treeCopied.includes("hosts"));
+      assert.ok(treeCopied.includes("src/"));
+
+      clipboard.content = "@ctx glob **/*";
+      const globCode = await new RequestUseCase(clipboard, terminal, git, fs, new FakeSearch()).read({
+        allowSensitive: false,
+      });
+      assert.equal(globCode, 0);
+      const globCopied = clipboard.lastCopied() ?? "";
+      assert.ok(!globCopied.includes("etc-link"));
+      assert.ok(!globCopied.includes("hosts"));
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

@@ -63,3 +63,26 @@
   coverage (tree/glob/inspect always; search via real ripgrep when installed).
   Manually verified the packaged CLI: tree/glob/inspect/search, `--copy`, a
   combined `@ctx tree + @ctx search` round trip, and the `@ctx status` refusal.
+
+## 2026-08-20 — #4 (review fix) discovery walks enforce the resolved-link boundary
+
+- Reviewer found that `tree`/`glob`/`inspect` walks recursed into directory
+  symlinks resolving outside the allowed roots (e.g. `etc-link -> /etc`) and
+  disclosed external names, violating PRD #4's allowed-root/resolved-link rule.
+- `PathGuard` gained `resolvedWithinRoots(absPath)`: true only when the fully
+  resolved symlink target lies inside an allowed root; broken links fail closed.
+- `walkTreeAt` (tree + inspect trees) and `walkGlob` now skip any entry whose
+  symlink escapes the allowed roots before listing or recursing (counted in the
+  existing `Excluded` number). Search already validated each match via `guard`.
+  Direct CLI (`--copy`), `@ctx tree`/`@ctx glob` requests, and root-scoped
+  `inspect` all go through these walks, so the fix covers every discovery path.
+- `FakeFs` now mirrors real fs symlink semantics: `realpath` resolves chained
+  symlinks component-wise, `isDirectory` follows links, and `readDir` surfaces
+  symlink names (so the fake genuinely reproduces the leak without the fix).
+- Added unit tests (escaping dir symlink skipped in tree, copied response clean,
+  glob no-leak through escaping dir, escaping file symlink skipped, in-root
+  symlinked dir still walked, escaping inspect scope refused) and real-filesystem
+  integration tests (`--copy` and `@ctx` requests against an escaping dir
+  symlink). Verified the packaged CLI manually with a real `tmp-link -> /tmp`
+  symlink: tree/glob/`--copy`/`@ctx read` show no external names. 147 tests pass.
+

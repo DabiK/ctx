@@ -102,8 +102,7 @@ export class FakeFs implements FsPort {
   }
 
   realpath(path: string): string | null {
-    const direct = this.symlinks.get(path);
-    const target = direct ?? path;
+    const target = this.resolvePath(path);
     if (this.exists(target)) {
       return target;
     }
@@ -111,28 +110,27 @@ export class FakeFs implements FsPort {
   }
 
   isDirectory(path: string): boolean {
-    return this.dirs.has(path);
+    // Like statSync, follow the symlink before testing the entry.
+    return this.dirs.has(this.resolvePath(path));
   }
 
   readDir(path: string): string[] {
-    const base = path === "/" ? "/" : path.replace(/\/$/, "") + "/";
+    // Like readdirSync on a symlinked directory, list the resolved target and
+    // surface symlink entries (lstat shows them as names) alongside files.
+    const target = this.resolvePath(path);
+    const base = target === "/" ? "/" : target.replace(/\/$/, "") + "/";
     const names = new Set<string>();
-    for (const key of this.files.keys()) {
+    const addUnder = (key: string): void => {
       if (key.startsWith(base)) {
         const name = key.slice(base.length).split("/")[0];
         if (name !== undefined && name !== "") {
           names.add(name);
         }
       }
-    }
-    for (const key of this.dirs.keys()) {
-      if (key.startsWith(base)) {
-        const name = key.slice(base.length).split("/")[0];
-        if (name !== undefined && name !== "") {
-          names.add(name);
-        }
-      }
-    }
+    };
+    for (const key of this.files.keys()) addUnder(key);
+    for (const key of this.dirs.keys()) addUnder(key);
+    for (const key of this.symlinks.keys()) addUnder(key);
     return [...names];
   }
 
@@ -165,6 +163,28 @@ export class FakeFs implements FsPort {
       acc += "/" + segment;
       this.dirs.add(acc);
     }
+  }
+
+  /**
+   * Fully resolve `path` through chained symlinks at every path component,
+   * mirroring realpathSync semantics (POSIX-style paths).
+   */
+  private resolvePath(path: string): string {
+    const isAbsolute = path.startsWith("/");
+    const parts = path.split("/").filter((s) => s.length > 0);
+    let current = isAbsolute ? "/" : "";
+    let hops = 0;
+    for (const part of parts) {
+      const next = current === "/" || current === "" ? current + part : current + "/" + part;
+      current = next;
+      let resolved = this.symlinks.get(current);
+      while (resolved !== undefined && hops < 16) {
+        current = resolved;
+        resolved = this.symlinks.get(current);
+        hops++;
+      }
+    }
+    return current;
   }
 
   private joinPosix(...parts: string[]): string {

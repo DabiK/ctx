@@ -244,3 +244,89 @@ describe("DiscoveryUseCase.inspect", () => {
     assert.ok(out.includes("… (content truncated to the first lines)"));
   });
 });
+
+describe("DiscoveryUseCase symlink boundary", () => {
+  it("tree skips a directory symlink escaping the root and never lists its contents", async () => {
+    const { discovery, fs, terminal } = makeDiscovery();
+    seedRepo(fs);
+    fs.seed("/etc/hosts", "127.0.0.1 localhost\n");
+    fs.seedSymlink(`${ROOT}/etc-link`, "/etc");
+
+    const code = await discovery.tree(null, { copy: false, allowSensitive: false, protocol: false });
+
+    assert.equal(code, 0);
+    const out = terminal.infoLines.join("\n");
+    assert.ok(!out.includes("etc-link"), "escaping symlink entry skipped");
+    assert.ok(!out.includes("hosts"), "external directory contents never listed");
+    assert.ok(out.includes("Excluded: 3"), "escape counted as excluded");
+  });
+
+  it("copied tree responses never include symlink escapes", async () => {
+    const { discovery, fs, clipboard } = makeDiscovery();
+    seedRepo(fs);
+    fs.seed("/etc/hosts", "127.0.0.1 localhost\n");
+    fs.seedSymlink(`${ROOT}/etc-link`, "/etc");
+
+    await discovery.tree(null, { copy: true, allowSensitive: false, protocol: false });
+
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(!copied.includes("etc-link"), "escaping symlink absent from copied response");
+    assert.ok(!copied.includes("hosts"), "external contents absent from copied response");
+    assert.ok(copied.includes("app.ts"), "in-repo entries still present");
+  });
+
+  it("glob never matches files through a directory symlink escaping the root", async () => {
+    const { discovery, fs, terminal } = makeDiscovery();
+    seedRepo(fs);
+    fs.seed("/etc/hosts", "127.0.0.1 localhost\n");
+    fs.seedSymlink(`${ROOT}/etc-link`, "/etc");
+
+    const code = await discovery.glob("**/*", { copy: false, allowSensitive: false, protocol: false });
+
+    assert.equal(code, 0);
+    const out = terminal.infoLines.join("\n");
+    assert.ok(!out.includes("etc-link"));
+    assert.ok(!out.includes("hosts"));
+  });
+
+  it("glob skips a file symlink whose target lies outside the allowed roots", async () => {
+    const { discovery, fs, terminal } = makeDiscovery();
+    seedRepo(fs);
+    fs.seed("/outside/secret.ts", "leaked\n");
+    fs.seedSymlink(`${ROOT}/leak.ts`, "/outside/secret.ts");
+
+    const code = await discovery.glob("*.ts", { copy: false, allowSensitive: false, protocol: false });
+
+    assert.equal(code, 0);
+    const out = terminal.infoLines.join("\n");
+    assert.ok(!out.includes("leak.ts"), "escaping file symlink not matched");
+    assert.ok(out.includes("- src/app.ts"), "in-repo matches still listed");
+  });
+
+  it("still walks directory symlinks that resolve inside the repository", async () => {
+    const { discovery, fs, terminal } = makeDiscovery();
+    seedRepo(fs);
+    fs.seedSymlink(`${ROOT}/src-link`, `${ROOT}/src`);
+
+    const code = await discovery.tree(null, { copy: false, allowSensitive: false, protocol: false });
+
+    assert.equal(code, 0);
+    const out = terminal.infoLines.join("\n");
+    assert.ok(out.includes("src-link/"));
+    assert.ok(out.includes("  app.ts"), "contents of an in-root symlinked dir still listed");
+  });
+
+  it("refuses an inspect scope that is a directory symlink escaping the root", async () => {
+    const { discovery, fs, terminal } = makeDiscovery();
+    seedRepo(fs);
+    fs.seed("/etc/hosts", "127.0.0.1 localhost\n");
+    fs.seedSymlink(`${ROOT}/etc-link`, "/etc");
+
+    const code = await discovery.inspect("etc-link", { copy: false, allowSensitive: false, protocol: false });
+
+    assert.equal(code, 1);
+    const out = terminal.infoLines.join("\n");
+    assert.ok(out.includes("Scope refused"));
+    assert.ok(out.includes("outside the allowed roots"));
+  });
+});

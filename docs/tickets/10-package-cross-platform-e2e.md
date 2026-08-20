@@ -8,11 +8,11 @@ Make ctx distributable and prove the full clipboard workflow on both supported p
 
 ## Acceptance criteria
 
-- [ ] The package exposes the `ctx` executable through npm and documents installation plus all required platform prerequisites.
-- [ ] macOS and Windows CI execute the supported fixture workflow; Windows verifies the search fallback when ripgrep is unavailable.
-- [ ] The end-to-end scenario covers initial prompt copying, context request/response, a multi-file patch or full write, post-write verification, and a visible failure case.
-- [ ] Documentation clearly distinguishes supported macOS/Windows behavior from future platform work.
-- [ ] Release verification includes `ctx doctor` output for a ready and a missing-prerequisite environment.
+- [x] The package exposes the `ctx` executable through npm and documents installation plus all required platform prerequisites.
+- [x] macOS and Windows CI execute the supported fixture workflow; Windows verifies the search fallback when ripgrep is unavailable.
+- [x] The end-to-end scenario covers initial prompt copying, context request/response, a multi-file patch or full write, post-write verification, and a visible failure case.
+- [x] Documentation clearly distinguishes supported macOS/Windows behavior from future platform work.
+- [x] Release verification includes `ctx doctor` output for a ready and a missing-prerequisite environment.
 
 ## Blocked by
 

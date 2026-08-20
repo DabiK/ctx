@@ -10,6 +10,8 @@
 
 import { EXECUTABLE_NAME, PRODUCT_NAME, VERSION } from "./branding.js";
 import { MAX_DEPTH, MAX_RESULTS } from "./config.js";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { PlatformPorts } from "./application/ports.js";
 import { DoctorUseCase } from "./application/doctor.js";
 import { DiscoveryUseCase } from "./application/discovery.js";
@@ -702,7 +704,30 @@ export async function main(argv: string[]): Promise<number> {
   return runCli(argv, ports);
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.js")) {
+/**
+ * True when this module is the process entry point. Covers `node dist/cli.js`
+ * and the npm-installed `ctx` bin, which npm links as a symlink to
+ * `dist/cli.js` (so `process.argv[1]` is the symlink path, not the file).
+ */
+export function isDirectEntry(argv1: string | undefined, importUrl: string): boolean {
+  if (argv1 === undefined) {
+    return false;
+  }
+  if (importUrl === `file://${argv1}` || argv1.endsWith("cli.js")) {
+    return true;
+  }
+  try {
+    // Both sides must resolve to the same real file: the npm bin is a symlink
+    // to dist/cli.js, and the module URL may itself pass through symlinked
+    // path components (e.g. /var -> /private/var on macOS).
+    const entry = realpathSync(fileURLToPath(importUrl));
+    return realpathSync(argv1) === entry;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectEntry(process.argv[1], import.meta.url)) {
   main(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;

@@ -7,8 +7,50 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { CONFIG_FILE_NAME, IGNORE_FILE_NAME, RESPONSE_MARKER } from "../branding.js";
-import { parseArgs, runCli } from "../cli.js";
+import { isDirectEntry, parseArgs, runCli } from "../cli.js";
 import { fakePorts } from "./fakes.js";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+describe("isDirectEntry", () => {
+  it("detects `node dist/cli.js` and `node <absolute path>/cli.js`", () => {
+    assert.equal(isDirectEntry("/app/dist/cli.js", "file:///app/dist/cli.js"), true);
+    assert.equal(isDirectEntry("dist/cli.js", "file:///app/dist/cli.js"), true);
+  });
+
+  it("detects the npm bin symlink, which resolves back to cli.js", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctx-entry-"));
+    try {
+      const real = join(dir, "cli.js");
+      const symlink = join(dir, "node_modules", ".bin", "ctx");
+      writeFileSync(real, "");
+      mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+      symlinkSync(real, symlink);
+      assert.equal(
+        isDirectEntry(symlink, `file://${real}`),
+        true,
+        "the npm bin symlink must resolve to the entry module",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false for plain module imports and missing argv", () => {
+    assert.equal(isDirectEntry(undefined, "file:///app/dist/cli.js"), false);
+    assert.equal(isDirectEntry("/app/lib/util.js", "file:///app/dist/cli.js"), false);
+    const dir = mkdtempSync(join(tmpdir(), "ctx-entry-"));
+    try {
+      // An existing module that is not the entry point must not match.
+      const other = join(dir, "module.js");
+      writeFileSync(other, "");
+      assert.equal(isDirectEntry(other, `file://${join(dir, "cli.js")}`), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("parseArgs", () => {
   it("accepts a bare command", () => {

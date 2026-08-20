@@ -205,7 +205,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #8 Watcher TUI safe and auto.
   >
 
-- [ ] #10 — Package, cross-platform CI and E2E (labels: ready-for-agent)
+- [x] #10 — Package, cross-platform CI and E2E (labels: ready-for-agent)
 
   **Issue #10 — détail complet**
   > ## Parent

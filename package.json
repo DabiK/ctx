@@ -16,9 +16,24 @@
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",
+    "e2e": "npm run build && node scripts/e2e.mjs",
+    "pack:check": "npm run build && node scripts/pack-check.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run pack:check",
     "start": "node dist/cli.js"
   },
+  "keywords": [
+    "clipboard",
+    "context",
+    "llm",
+    "cli",
+    "git",
+    "prompt"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DabiK/ctx.git"
+  },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "typescript": "^5.9.3"

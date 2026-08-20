@@ -378,3 +378,58 @@
   including the root AGENTS.md verbatim (and the absence report when absent),
   several subsequent polls leave the prompt untouched on the clipboard
   (loop prevention), and no `.ctx.toml`/`.ctxignore` appears in the repo.
+
+## 2026-08-20 — #10 Package, cross-platform CI and E2E
+
+- Made ctx distributable and proved the full clipboard workflow on macOS and
+  Windows. Packaging, CI, the end-to-end fixture workflow, and release
+  documentation are all in place; the remaining fix queue is empty.
+- **Packaging**: package.json gained `repository`, `keywords`, and the
+  `prepublishOnly` gate (typecheck + test + pack:check). `npm pack` ships
+  `dist/` and the `ctx` bin. `scripts/pack-check.mjs` (`npm run pack:check`)
+  packs the tarball, installs it into a fresh temporary consumer directory (a
+  real `npm install`, not the checkout), and runs the installed `ctx`
+  binary: `--version` must print `ctx 0.1.0`, `--help` must show usage, and
+  `doctor` outside a repository must exit non-zero with the recovery message.
+- **Fixed a real packaging bug** discovered by pack:check: npm links the
+  `ctx` bin as a *symlink* to `dist/cli.js`, so `process.argv[1]` is the
+  symlink path and the old `main()` entry guard (`import.meta.url ===
+  file://argv[1]` / `endsWith("cli.js")`) never fired — the installed bin
+  exited 0 printing nothing. `cli.ts` now exposes `isDirectEntry(argv1,
+  importUrl)` which additionally `realpathSync`s both the argv path and the
+  module URL (resolving `/var -> /private/var` on macOS) and compares them;
+  unit tests cover `node dist/cli.js`, the npm bin symlink, plain module
+  imports, and missing argv.
+- **E2E fixture workflow** (`scripts/e2e.mjs`, `npm run e2e`): runs the built
+  `dist/cli.js` against a fresh temporary Git repository (LF fixtures,
+  `core.autocrlf false`) with the clipboard redirected to a file. 11 steps:
+  `init` creates `.ctx.toml`/`.ctxignore` and copies the protocol + root
+  AGENTS.md verbatim; `prompt --compact` copies a smaller prompt; `@ctx file`
+  and combined `@ctx status` + `@ctx file` round-trip a numbered
+  `# CTX RESPONSE` (untracked `.ctx.toml`/`.ctxignore` reported by status);
+  `@ctx search` returns matches; a real two-file `git diff` patch is
+  previewed by `ctx read` (no files change) then applied by `ctx apply`;
+  post-write verification via `@ctx status` + `@ctx diff` confirms the change;
+  a traversal request is refused without leaking target content and
+  `ctx apply` without a proposal copies `## Request refused`; on Windows
+  search still works through the `findstr` fallback with ripgrep hidden from
+  PATH (doctor reports the fallback warning), elsewhere a missing ripgrep
+  yields the actionable error.
+- **Deterministic clipboard hook**: `SystemClipboard` honors
+  `CTX_CLIPBOARD_FILE` (infrastructure-only): copy writes the file (creating
+  parent dirs), read returns its content, a missing file reads as an empty
+  clipboard, and the redirect is ignored when unset (unsupported platforms
+  keep rejecting). `src/tests/clipboard-file.test.ts` covers the hook with an
+  unsupported-platform env stub so no test touches the real clipboard.
+- **CI** (`.github/workflows/ci.yml`): `npm ci`, typecheck, `npm test`,
+  `pack:check`, and `e2e` on a macOS + Windows matrix (`fail-fast: false`).
+- **Documentation**: README.md (installation from npm, per-platform
+  prerequisites table, `ctx doctor` recovery path, protocol round trip,
+  platform support vs future work, `CTX_CLIPBOARD_FILE` hook, development
+  commands) and docs/release.md (automated gates, release checklist, and
+  verified `ctx doctor` output for a ready environment, no-repository, and
+  no-ripgrep-on-macOS environments, plus the Windows fallback warning).
+- 319 tests pass (new: clipboard-file hook suite, `isDirectEntry` suite);
+  typecheck clean. Verified locally on macOS: `npm run e2e` (11/11 steps),
+  `npm run pack:check` (tarball installs and `ctx --version` runs), and the
+  real `ctx doctor` outputs captured for docs/release.md.

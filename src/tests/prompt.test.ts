@@ -75,6 +75,16 @@ describe("prompt builders", () => {
     for (const p of [buildPrompt(), buildCompactPrompt()]) {
       assert.ok(p.includes("@ctx"));
       assert.ok(p.includes(RESPONSE_MARKER));
+      assert.ok(p.includes("ctx read"));
+      assert.ok(p.includes("ctx watch"));
+    }
+  });
+
+  it("teaches the clipboard round trip without asking for init again", () => {
+    for (const p of [buildPrompt(), buildCompactPrompt()]) {
+      assert.ok(p.includes("standalone @ctx block"));
+      assert.ok(p.toLowerCase().includes("read request"));
+      assert.ok(p.includes("Do not ask"));
     }
   });
 });

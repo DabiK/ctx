@@ -193,4 +193,86 @@ export interface PlatformPorts {
   fs: FsPort;
   env: EnvPort;
   search: SearchPort;
+  tui: TuiPort;
+  clock: ClockPort;
+}
+
+/**
+ * Watcher clock: deterministic time and poll cadence for the `ctx watch` loop.
+ * The real adapter reads the system clock; tests inject a scripted fake so the
+ * loop is fully deterministic.
+ */
+export interface ClockPort {
+  /** Current epoch time in milliseconds (used for event timestamps). */
+  now(): number;
+  /** Clipboard poll interval in milliseconds (the loop's tick cadence). */
+  pollIntervalMs(): number;
+}
+
+/** Current watcher mode: safe confirms actions, auto runs valid reads. */
+export type WatchMode = "safe" | "auto";
+
+/** One recent watcher event (newest last in the view). */
+export interface WatchEvent {
+  /** Monotonic sequence number assigned by the watcher use case. */
+  seq: number;
+  /** Epoch time at which the event happened (`ClockPort.now()`). */
+  at: number;
+  /** Human-readable event description. */
+  text: string;
+}
+
+/** A proposed write awaiting an explicit TUI action. */
+export interface PendingWrite {
+  /** Monotonic sequence number assigned by the watcher use case. */
+  seq: number;
+  /** Label: "Patch proposal", "Write proposal", or "Sequence proposal". */
+  label: string;
+  /** Target repository-relative paths of the proposal. */
+  targets: string[];
+  /** One-line validation outcome (status note of the preview). */
+  statusNote: string;
+  /** Full preview or refusal response text (shown by the preview action). */
+  previewText: string;
+  /** The parsed proposal, applied by the explicit apply action. */
+  proposal: import("../protocol.js").Proposal;
+}
+
+/** The state the watcher renders on every change. */
+export interface WatcherView {
+  mode: WatchMode;
+  /** Recent events, newest last. */
+  events: WatchEvent[];
+  /** Pending proposed writes awaiting an explicit action. */
+  pendingWrites: PendingWrite[];
+  /** The latest `# CTX RESPONSE` block the watcher copied, or null. */
+  latestResponse: string | null;
+  /** Footer hint line (key bindings, current mode). */
+  footer: string;
+}
+
+/**
+ * Foreground TUI port: terminal interaction for `ctx watch`. The application
+ * watcher drives the loop exclusively through this port; Node terminal code
+ * stays in the infrastructure adapter.
+ */
+export interface TuiPort {
+  /** Enter interactive mode (raw keyboard input, cursor hidden). */
+  open(): void;
+  /** Render the current watcher view (called after every state change). */
+  render(view: WatcherView): void;
+  /**
+   * Wait for the next key press, resolving the raw key text (a single
+   * character for ordinary keys, escape sequences for arrows). Resolves
+   * `null` after `timeoutMs` without input — a clock tick for the watcher.
+   */
+  nextKey(timeoutMs: number): Promise<string | null>;
+  /** Read one command-entry line; resolves `null` when cancelled (Esc). */
+  readLine(prompt: string): Promise<string | null>;
+  /** Ask a yes/no question; resolves `true` on yes, `false` otherwise. */
+  confirm(prompt: string): Promise<boolean>;
+  /** Show `text` full-screen and resolve when the user dismisses it. */
+  showDetail(text: string): Promise<void>;
+  /** Leave interactive mode and restore the terminal (exit path). */
+  close(): void;
 }

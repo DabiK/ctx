@@ -4,6 +4,7 @@
  */
 
 import type {
+  ClockPort,
   ClipboardPort,
   EnvPort,
   FsPort,
@@ -18,6 +19,8 @@ import type {
   SearchMatch,
   SearchPort,
   TerminalPort,
+  TuiPort,
+  WatcherView,
 } from "../application/ports.js";
 
 export class FakeClipboard implements ClipboardPort {
@@ -334,6 +337,86 @@ export class FakeSearch implements SearchPort {
   }
 }
 
+/** Scripted watcher clock: deterministic time and poll interval. */
+export class FakeClock implements ClockPort {
+  nowValue = 0;
+  pollMs = 10;
+
+  now(): number {
+    return this.nowValue;
+  }
+
+  pollIntervalMs(): number {
+    return this.pollMs;
+  }
+
+  /** Advance the fake clock (used to move event timestamps). */
+  advance(ms: number): void {
+    this.nowValue += ms;
+  }
+}
+
+/**
+ * Scripted TUI used by watcher tests. `keys` drives `nextKey` in order; when
+ * exhausted it yields `q` (quit) so a test loop always terminates. `confirm`
+ * and `readLine` return the next scripted value (defaulting to `false`/`null`).
+ */
+export class FakeTui implements TuiPort {
+  openCalls = 0;
+  closeCalls = 0;
+  rendered: WatcherView[] = [];
+  keys: (string | null)[] = [];
+  confirmAnswers: boolean[] = [];
+  readLineValues: (string | null)[] = [];
+  details: string[] = [];
+
+  open(): void {
+    this.openCalls++;
+  }
+
+  close(): void {
+    this.closeCalls++;
+  }
+
+  render(view: WatcherView): void {
+    this.rendered.push(view);
+  }
+
+  async nextKey(_timeoutMs: number): Promise<string | null> {
+    const key = this.keys.shift();
+    return key === undefined ? "q" : key;
+  }
+
+  async confirm(_prompt: string): Promise<boolean> {
+    const answer = this.confirmAnswers.shift();
+    return answer === undefined ? false : answer;
+  }
+
+  async readLine(_prompt: string): Promise<string | null> {
+    const value = this.readLineValues.shift();
+    return value === undefined ? null : value;
+  }
+
+  async showDetail(text: string): Promise<void> {
+    this.details.push(text);
+  }
+
+  /** The most recently rendered view (or an empty placeholder). */
+  lastView(): WatcherView {
+    const last = this.rendered[this.rendered.length - 1];
+    if (last !== undefined) {
+      return last;
+    }
+    return {
+      mode: "safe",
+      events: [],
+      pendingWrites: [],
+      latestResponse: null,
+      footer: "",
+    };
+  }
+}
+
 /** Build a full fake port bundle with defaults. */
 export function fakePorts(overrides: Partial<{
   clipboard: FakeClipboard;
@@ -342,6 +425,8 @@ export function fakePorts(overrides: Partial<{
   fs: FakeFs;
   env: FakeEnv;
   search: FakeSearch;
+  tui: FakeTui;
+  clock: FakeClock;
 }> = {}): {
   ports: PlatformPorts;
   clipboard: FakeClipboard;
@@ -350,6 +435,8 @@ export function fakePorts(overrides: Partial<{
   fs: FakeFs;
   env: FakeEnv;
   search: FakeSearch;
+  tui: FakeTui;
+  clock: FakeClock;
 } {
   const clipboard = overrides.clipboard ?? new FakeClipboard();
   const terminal = overrides.terminal ?? new FakeTerminal();
@@ -357,13 +444,17 @@ export function fakePorts(overrides: Partial<{
   const fs = overrides.fs ?? new FakeFs();
   const env = overrides.env ?? new FakeEnv();
   const search = overrides.search ?? new FakeSearch();
+  const tui = overrides.tui ?? new FakeTui();
+  const clock = overrides.clock ?? new FakeClock();
   return {
-    ports: { clipboard, terminal, git, fs, env, search },
+    ports: { clipboard, terminal, git, fs, env, search, tui, clock },
     clipboard,
     terminal,
     git,
     fs,
     env,
     search,
+    tui,
+    clock,
   };
 }

@@ -140,6 +140,11 @@ describe("parseArgs", () => {
     assert.equal(show.parsed.command, "show");
     assert.deepEqual(show.parsed.args, ["HEAD~2", "src/app.ts"]);
 
+    const watch = parseArgs(["watch", "--allow-sensitive"]);
+    assert.ok(!("error" in watch));
+    assert.equal(watch.parsed.command, "watch");
+    assert.equal(watch.parsed.allowSensitive, true);
+
     assert.ok("error" in parseArgs(["status", "extra"]));
     assert.ok("error" in parseArgs(["changed", "a", "b"]));
     assert.ok("error" in parseArgs(["diff", "a", "b"]));
@@ -150,6 +155,7 @@ describe("parseArgs", () => {
     assert.ok("error" in parseArgs(["show", "HEAD", "a", "b"]));
     assert.ok("error" in parseArgs(["show", "$(rm -rf /)", "src/app.ts"]));
     assert.ok("error" in parseArgs(["show", "HEAD", "/etc/passwd"]));
+    assert.ok("error" in parseArgs(["watch", "extra"]));
   });
 });
 
@@ -178,6 +184,8 @@ describe("runCli", () => {
       "diff",
       "log",
       "show",
+      "apply",
+      "watch",
     ]) {
       const { ports, terminal } = fakePorts();
       const code = await runCli([cmd, "--help"], ports);
@@ -449,5 +457,15 @@ describe("runCli", () => {
     assert.equal(code, 1);
     const copied = clipboard.lastCopied() ?? "";
     assert.ok(copied.includes("no write proposal found"));
+  });
+
+  it("runs watch through the CLI and quits cleanly with the fake TUI", async () => {
+    const { ports, tui } = fakePorts();
+
+    const code = await runCli(["watch"], ports);
+
+    assert.equal(code, 0);
+    assert.equal(tui.openCalls, 1);
+    assert.equal(tui.closeCalls, 1);
   });
 });

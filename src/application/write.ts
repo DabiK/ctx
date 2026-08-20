@@ -22,13 +22,15 @@
 import { CONFIG_FILE_NAME, PRODUCT_NAME, REQUEST_MARKER, RESPONSE_MARKER } from "../branding.js";
 import { clampBatchBytes, parseProjectConfig, type ProjectConfig } from "../config.js";
 import {
+  describeReadOp,
   extractDiffTargets,
-  isProposalOp,
+  isProposalRequest,
   parseRequestText,
+  singleProposal,
   SUPPORTED_OPS,
-  type ProposalOp,
+  type ParsedOkRequest,
+  type Proposal,
   type ReadOp,
-  type RequestOp,
 } from "../protocol.js";
 import { containsSensitiveContent, diffAddsSensitiveContent } from "../sensitive.js";
 import { PathGuard } from "./boundary.js";
@@ -62,12 +64,6 @@ export interface WriteOptions {
   allowSensitive: boolean;
 }
 
-/** One validated proposal (standalone or the write inside a sequence). */
-type Proposal = ProposalOp | { kind: "sequence"; write: ProposalOp; verify: ReadOp[] };
-
-/** The ok branch of a parsed request. */
-type ParsedOk = { ok: true; ops: RequestOp[]; batch: boolean; sequence: boolean };
-
 /** Repository context shared by the write operations. */
 interface WriteContext {
   root: string;
@@ -85,6 +81,29 @@ interface ValidatedProposal {
   statusNote: string;
   /** Preview-only note about the verification reads of a sequence. */
   verificationNote: string | null;
+}
+
+/** Result of building the preview/refusal response of a proposal (no copy). */
+export interface PreviewOutcome {
+  status: "preview" | "refused";
+  code: number;
+  /** The preview or refusal response text (caller decides whether to copy). */
+  response: string;
+  /** Human-readable proposal label ("Patch proposal", ...). */
+  label: string;
+  targets: WriteTargetReport[];
+  statusNote: string;
+}
+
+/** Result of applying a proposal (the response is copied by the method). */
+export interface ApplyOutcome {
+  status: "applied" | "refused" | "failed";
+  code: number;
+  /** The copied response text (applied, refusal, or fail-closed oversized). */
+  response: string;
+  label: string;
+  targets: WriteTargetReport[];
+  statusNote: string;
 }
 
 export class WriteUseCase {
@@ -105,14 +124,44 @@ export class WriteUseCase {
    * clipboard request and copy a preview response. Nothing is changed; the
    * preview tells the LLM to run `ctx apply` for the actual write.
    */
-  async preview(parsed: ParsedOk, allowSensitive: boolean): Promise<number> {
-    const ctx = await this.openContext(allowSensitive);
-    if (ctx === null) {
+  async preview(parsed: ParsedOkRequest, allowSensitive: boolean): Promise<number> {
+    const proposal = singleProposal(parsed);
+    if (proposal === null) {
+      this.terminal.error(`${PRODUCT_NAME}: no write proposal found in the request.`);
       return EXIT_FAILURE;
     }
-    const proposal = this.singleProposal(parsed);
-    if (proposal === null) {
+    const outcome = await this.previewParsed(proposal, allowSensitive);
+    if (outcome === null) {
       return EXIT_FAILURE;
+    }
+    await copyOrThrow(outcome.response, this.clipboard, this.terminal);
+    if (outcome.status === "refused") {
+      this.terminal.error(
+        `${PRODUCT_NAME}: ${outcome.label.toLowerCase()} refused — nothing was changed (refusal copied to the clipboard).`,
+      );
+    } else {
+      this.terminal.info(
+        `${PRODUCT_NAME}: ${outcome.label.toLowerCase()} validated and preflighted — apply it unchanged with ` +
+          `\`${PRODUCT_NAME} apply\` (preview copied to the clipboard).`,
+      );
+    }
+    return outcome.code;
+  }
+
+  /**
+   * Validate and preflight an already-parsed proposal and build its preview or
+   * refusal response text, without copying anything. Shared by `preview`
+   * (which copies it) and the watcher (which surfaces it as a pending write
+   * while the proposal stays in the clipboard). Returns `null` on an
+   * infrastructure failure (already reported to the terminal).
+   */
+  async previewParsed(
+    proposal: Proposal,
+    allowSensitive: boolean,
+  ): Promise<PreviewOutcome | null> {
+    const ctx = await this.openContext(allowSensitive);
+    if (ctx === null) {
+      return null;
     }
     const validation = await this.validateProposal(proposal, ctx, allowSensitive);
     const label = proposalLabel(proposal);
@@ -124,11 +173,14 @@ export class WriteUseCase {
         );
       }
       const response = buildWriteRefusedResponse(label, validation.targets, issues);
-      await copyOrThrow(response, this.clipboard, this.terminal);
-      this.terminal.error(
-        `${PRODUCT_NAME}: ${label.toLowerCase()} refused — nothing was changed (refusal copied to the clipboard).`,
-      );
-      return EXIT_FAILURE;
+      return {
+        status: "refused",
+        code: EXIT_FAILURE,
+        response,
+        label,
+        targets: validation.targets,
+        statusNote: validation.statusNote,
+      };
     }
     const response = buildWritePreviewResponse(
       label,
@@ -136,12 +188,14 @@ export class WriteUseCase {
       validation.statusNote,
       validation.verificationNote,
     );
-    await copyOrThrow(response, this.clipboard, this.terminal);
-    this.terminal.info(
-      `${PRODUCT_NAME}: ${label.toLowerCase()} validated and preflighted — apply it unchanged with ` +
-        `\`${PRODUCT_NAME} apply\` (preview copied to the clipboard).`,
-    );
-    return EXIT_OK;
+    return {
+      status: "preview",
+      code: EXIT_OK,
+      response,
+      label,
+      targets: validation.targets,
+      statusNote: validation.statusNote,
+    };
   }
 
   /**
@@ -151,11 +205,14 @@ export class WriteUseCase {
    * reads of a sequence only after the write succeeds.
    */
   async apply(opts: WriteOptions): Promise<number> {
-    const ctx = await this.openContext(opts.allowSensitive);
-    if (ctx === null) {
+    // Fail before touching the clipboard when there is no repository: apply
+    // without a repository must report the actionable Git-root message and
+    // copy nothing. The context is re-opened in `applyParsed` so the write
+    // is re-validated against the current repository state.
+    const preflight = await this.openContext(opts.allowSensitive);
+    if (preflight === null) {
       return EXIT_FAILURE;
     }
-
     let requestText: string;
     try {
       requestText = await this.clipboard.read();
@@ -173,8 +230,7 @@ export class WriteUseCase {
       );
       return EXIT_FAILURE;
     }
-    const proposal = this.singleProposal(parsed);
-    if (proposal === null) {
+    if (!isProposalRequest(parsed)) {
       const response = buildRefusalResponse(
         `no write proposal found in the clipboard — expected a tagged \`${REQUEST_MARKER} patch\`, ` +
           `\`${REQUEST_MARKER} write\`, or \`${REQUEST_MARKER} sequence\``,
@@ -185,6 +241,48 @@ export class WriteUseCase {
         `${PRODUCT_NAME}: apply refused — no write proposal in the clipboard (refusal copied).`,
       );
       return EXIT_FAILURE;
+    }
+    const proposal = singleProposal(parsed);
+    if (proposal === null) {
+      return EXIT_FAILURE;
+    }
+
+    const outcome = await this.applyParsed(proposal, opts);
+    if (outcome === null) {
+      return EXIT_FAILURE;
+    }
+    if (outcome.status === "refused") {
+      this.terminal.error(
+        `${PRODUCT_NAME}: ${outcome.label.toLowerCase()} refused — nothing was changed (refusal copied to the clipboard).`,
+      );
+    } else if (outcome.status === "failed") {
+      this.terminal.error(
+        `${PRODUCT_NAME}: ${outcome.label.toLowerCase()} failed — nothing was changed (diagnostic copied to the clipboard).`,
+      );
+    } else {
+      this.terminal.info(
+        `${PRODUCT_NAME}: ${proposal.kind === "patch" ? "patch" : "write"} applied — ` +
+          `${outcome.targets.length} file(s) changed; ${RESPONSE_MARKER} copied to the clipboard.`,
+      );
+    }
+    return outcome.code;
+  }
+
+  /**
+   * Apply an already-parsed proposal: re-validate, re-preflight, apply the
+   * write, run sequence verification reads only after the write succeeds, and
+   * copy the response (applied, refusal, or fail-closed oversized). Returns
+   * `null` on an infrastructure failure (already reported to the terminal).
+   * Shared by `apply` (which reads the proposal from the clipboard) and the
+   * watcher (which applies a pending write surfaced in the TUI).
+   */
+  async applyParsed(
+    proposal: Proposal,
+    opts: WriteOptions,
+  ): Promise<ApplyOutcome | null> {
+    const ctx = await this.openContext(opts.allowSensitive);
+    if (ctx === null) {
+      return null;
     }
 
     const validation = await this.validateProposal(proposal, ctx, opts.allowSensitive);
@@ -198,10 +296,14 @@ export class WriteUseCase {
       }
       const response = buildWriteRefusedResponse(label, validation.targets, issues);
       await copyOrThrow(response, this.clipboard, this.terminal);
-      this.terminal.error(
-        `${PRODUCT_NAME}: ${label.toLowerCase()} refused — nothing was changed (refusal copied to the clipboard).`,
-      );
-      return EXIT_FAILURE;
+      return {
+        status: "refused",
+        code: EXIT_FAILURE,
+        response,
+        label,
+        targets: validation.targets,
+        statusNote: validation.statusNote,
+      };
     }
 
     // Apply the write (patch via git apply, full write via the fs port).
@@ -213,10 +315,14 @@ export class WriteUseCase {
       }
       const response = buildWriteRefusedResponse(label, validation.targets, issues);
       await copyOrThrow(response, this.clipboard, this.terminal);
-      this.terminal.error(
-        `${PRODUCT_NAME}: ${label.toLowerCase()} failed — nothing was changed (diagnostic copied to the clipboard).`,
-      );
-      return EXIT_FAILURE;
+      return {
+        status: "failed",
+        code: EXIT_FAILURE,
+        response,
+        label,
+        targets: validation.targets,
+        statusNote: validation.statusNote,
+      };
     }
 
     // A sequence verifies the repository only after the write succeeded.
@@ -226,7 +332,7 @@ export class WriteUseCase {
         const exec = await this.collector.collect(vop, opts.allowSensitive);
         if (exec === null) {
           verification.push({
-            title: readOpLabel(vop),
+            title: describeReadOp(vop),
             lines: ["Not completed — the operation failed (see the terminal)."],
             bytes: 0,
           });
@@ -248,30 +354,24 @@ export class WriteUseCase {
     if (totalBytes > maxBatchBytes) {
       const oversized = buildWriteOversizedResponse(appliedLabel, totalBytes, maxBatchBytes);
       await copyOrThrow(oversized, this.clipboard, this.terminal);
-      this.terminal.error(
-        `${PRODUCT_NAME}: write applied, but the verification response was over the total budget ` +
-          `(${totalBytes} bytes > ${maxBatchBytes}) — a reduced ${RESPONSE_MARKER} was copied.`,
-      );
-      return EXIT_OK;
+      return {
+        status: "applied",
+        code: EXIT_OK,
+        response: oversized,
+        label: appliedLabel,
+        targets: validation.targets,
+        statusNote: validation.statusNote,
+      };
     }
     await copyOrThrow(response, this.clipboard, this.terminal);
-    this.terminal.info(
-      `${PRODUCT_NAME}: ${proposal.kind === "patch" ? "patch" : "write"} applied — ` +
-        `${validation.targets.length} file(s) changed; ${RESPONSE_MARKER} copied to the clipboard.`,
-    );
-    return EXIT_OK;
-  }
-
-  /** Extract the single proposal op of a parsed request (or `null`). */
-  private singleProposal(parsed: ParsedOk): Proposal | null {
-    const op = parsed.ops[0];
-    if (op === undefined) {
-      return null;
-    }
-    if (isProposalOp(op) || op.kind === "sequence") {
-      return op;
-    }
-    return null;
+    return {
+      status: "applied",
+      code: EXIT_OK,
+      response,
+      label: appliedLabel,
+      targets: validation.targets,
+      statusNote: validation.statusNote,
+    };
   }
 
   /**
@@ -409,7 +509,7 @@ export class WriteUseCase {
   private verificationNote(
     proposal: { kind: "sequence"; verify: ReadOp[] },
   ): string {
-    const labels = proposal.verify.map(readOpLabel);
+    const labels = proposal.verify.map(describeReadOp);
     return (
       `Verification: ${proposal.verify.length} read operation(s) run only after the write applies ` +
       `(${labels.join(", ")}).`
@@ -436,32 +536,4 @@ function proposalLabel(proposal: Proposal): string {
     return "Write proposal";
   }
   return "Sequence proposal";
-}
-
-/** Short label of a read operation (for skipped verification sections). */
-function readOpLabel(op: ReadOp): string {
-  switch (op.kind) {
-    case "file":
-      return `file ${op.specs[0] ?? ""}`;
-    case "files":
-      return `files ${op.specs.join(" ")}`;
-    case "tree":
-      return "tree";
-    case "glob":
-      return `glob ${op.pattern}`;
-    case "inspect":
-      return "inspect";
-    case "search":
-      return `search ${op.query}`;
-    case "status":
-      return "status";
-    case "changed":
-      return "changed";
-    case "diff":
-      return "diff";
-    case "log":
-      return "log";
-    case "show":
-      return `show ${op.rev} ${op.path}`;
-  }
 }

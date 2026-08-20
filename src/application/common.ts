@@ -47,6 +47,20 @@ export function estimateTokens(bytes: number): number {
 }
 
 /**
+ * Deterministic FNV-1a 32-bit hash (hex string) of `text`. Used by the
+ * watcher for clipboard loop prevention (duplicate-content detection) and is
+ * stable across platforms and Node versions because it is pure arithmetic.
+ */
+export function fnv1a(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+/**
  * Resolve the repository root or report an actionable error and return `null`.
  * Returns `EXIT_FAILURE` intent through `null`; callers stop early.
  */

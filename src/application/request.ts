@@ -15,9 +15,16 @@
  * copied instead of the oversized content.
  */
 
-import { CONFIG_FILE_NAME, PRODUCT_NAME } from "../branding.js";
+import { CONFIG_FILE_NAME, PRODUCT_NAME, RESPONSE_MARKER } from "../branding.js";
 import { clampBatchBytes, clampFileBytes, parseProjectConfig } from "../config.js";
-import { parseRequestText, SUPPORTED_OPS, isReadOp, type ReadOp } from "../protocol.js";
+import {
+  isProposalRequest,
+  isReadOp,
+  parseRequestText,
+  SUPPORTED_OPS,
+  type ParsedOkRequest,
+  type ReadOp,
+} from "../protocol.js";
 import { createCollector } from "./collect.js";
 import {
   EXIT_FAILURE,
@@ -36,8 +43,10 @@ import type {
 import {
   buildBatchResponse,
   buildCombinedResponse,
+  buildReadResponse,
   buildRecoveryResponse,
   buildRefusalResponse,
+  type ReadItem,
   type ResponsePart,
 } from "./response.js";
 import { WriteUseCase } from "./write.js";
@@ -56,6 +65,18 @@ interface RequestBudget {
   usedBatch: boolean;
 }
 
+/** The result of executing a parsed request: the copied response and report. */
+export interface ExecutedRequest {
+  /** Process exit-code intent (`EXIT_OK` / `EXIT_FAILURE`). */
+  code: number;
+  /** The response text that was copied to the clipboard. */
+  response: string;
+  /** Info lines the caller should surface (terminal or TUI event log). */
+  infoLines: string[];
+  /** Error lines the caller should surface (terminal or TUI event log). */
+  errorLines: string[];
+}
+
 export class RequestUseCase {
   private readonly collector: ReturnType<typeof createCollector>;
   private readonly writes: WriteUseCase;
@@ -72,8 +93,8 @@ export class RequestUseCase {
   }
 
   async read(opts: RequestOptions): Promise<number> {
-    const root = await requireGitRoot(this.git, this.fs, this.terminal);
-    if (root === null) {
+    // Fail early outside a Git repository (requireGitRoot reports the error).
+    if ((await requireGitRoot(this.git, this.fs, this.terminal)) === null) {
       return EXIT_FAILURE;
     }
 
@@ -99,14 +120,39 @@ export class RequestUseCase {
     // A tagged write proposal (patch, write, or sequence) is validated and
     // preflighted here without changing anything; applying happens through the
     // explicit `ctx apply` command while the proposal stays in the clipboard.
-    if (
-      parsed.sequence ||
-      (parsed.ops.length === 1 &&
-        (parsed.ops[0]?.kind === "patch" || parsed.ops[0]?.kind === "write"))
-    ) {
+    if (isProposalRequest(parsed)) {
       return this.writes.preview(parsed, opts.allowSensitive);
     }
 
+    const outcome = await this.execute(parsed, opts);
+    if (outcome === null) {
+      return EXIT_FAILURE;
+    }
+    for (const line of outcome.errorLines) {
+      this.terminal.error(line);
+    }
+    for (const line of outcome.infoLines) {
+      this.terminal.info(line);
+    }
+    return outcome.code;
+  }
+
+  /**
+   * Execute a parsed read request: resolve the project configuration and
+   * budgets, build the stable response (legacy single-read response for plain
+   * file/files requests, batch or combined envelope otherwise), apply the
+   * total-output budget fail closed, and copy it. Returns the copied response
+   * plus the report lines the caller surfaces on its channel — `null` on an
+   * infrastructure failure (already reported to the terminal).
+   */
+  async execute(
+    parsed: ParsedOkRequest,
+    opts: RequestOptions,
+  ): Promise<ExecutedRequest | null> {
+    const root = await requireGitRoot(this.git, this.fs, this.terminal);
+    if (root === null) {
+      return null;
+    }
     const config = parseProjectConfig(this.fs.readText(this.fs.join(root, CONFIG_FILE_NAME)));
     const budget: RequestBudget = {
       maxBatchBytes: clampBatchBytes(config.maxBatchBytes),
@@ -118,14 +164,62 @@ export class RequestUseCase {
     // read response (byte-identical to `ctx files --copy`).
     if (!parsed.batch && parsed.ops.every((op) => op.kind === "file" || op.kind === "files")) {
       const specs = parsed.ops.flatMap((op) => op.specs);
-      return this.collector.reader.files(specs, {
-        copy: true,
-        allowSensitive: opts.allowSensitive,
-        protocol: true,
-      });
+      return this.executeLegacyRead(specs, budget, opts.allowSensitive);
     }
 
     return this.executeCombined(parsed.ops.filter(isReadOp), opts, budget);
+  }
+
+  /** Execute the legacy single-read response for plain file/files requests. */
+  private async executeLegacyRead(
+    specs: string[],
+    budget: RequestBudget,
+    allowSensitive: boolean,
+  ): Promise<ExecutedRequest | null> {
+    const collected = await this.collector.reader.collectSpecs(specs, allowSensitive);
+    if (collected === null) {
+      return null;
+    }
+    const { items, maxBatchBytes } = collected;
+    const response = buildReadResponse(items);
+    const totalBytes = utf8ByteLength(response);
+    const readCount = items.filter((i): i is ReadItem => i.kind === "read").length;
+    const omittedCount = items.length - readCount;
+    const infoLines: string[] = [];
+    const errorLines: string[] = [];
+
+    if (totalBytes > maxBatchBytes) {
+      const recovery = buildRecoveryResponse(
+        items
+          .filter((i): i is ReadItem => i.kind === "read")
+          .map((i) => ({ title: i.relPath, bytes: i.byteCount })),
+        totalBytes,
+        maxBatchBytes,
+      );
+      await copyOrThrow(recovery, this.clipboard, this.terminal);
+      errorLines.push(
+        `${PRODUCT_NAME}: response over the total budget (${totalBytes} bytes > ${maxBatchBytes}) — ` +
+          `${RESPONSE_MARKER} recovery response copied to the clipboard.`,
+      );
+      return { code: EXIT_FAILURE, response: recovery, infoLines, errorLines };
+    }
+
+    await copyOrThrow(response, this.clipboard, this.terminal);
+    for (const item of items) {
+      if (item.kind === "omitted") {
+        errorLines.push(`${item.relPath}: ${item.reason}`);
+      }
+    }
+    infoLines.push(
+      `${PRODUCT_NAME}: processed request — ${readCount} read, ${omittedCount} omitted; ` +
+        `${RESPONSE_MARKER} copied to the clipboard.`,
+    );
+    return {
+      code: readCount === 0 ? EXIT_FAILURE : EXIT_OK,
+      response,
+      infoLines,
+      errorLines,
+    };
   }
 
   /** Execute a mixed or batch request into one response copied to the clipboard. */
@@ -133,7 +227,7 @@ export class RequestUseCase {
     ops: ReadOp[],
     opts: RequestOptions,
     budget: RequestBudget,
-  ): Promise<number> {
+  ): Promise<ExecutedRequest | null> {
     const parts: ResponsePart[] = [];
     const failures: string[] = [];
     let produced = false;
@@ -142,7 +236,7 @@ export class RequestUseCase {
       const exec = await this.collector.collect(op, opts.allowSensitive);
       if (exec === null) {
         // Infrastructure failure (already reported to the terminal).
-        return EXIT_FAILURE;
+        return null;
       }
       parts.push(exec.part);
       if (exec.produced) {
@@ -159,6 +253,8 @@ export class RequestUseCase {
       ? buildBatchResponse(parts, budget.maxBatchBytes, budget.perFileBytes)
       : buildCombinedResponse(parts);
     const totalBytes = utf8ByteLength(response);
+    const infoLines: string[] = [];
+    const errorLines: string[] = [];
     if (totalBytes > budget.maxBatchBytes) {
       const recovery = buildRecoveryResponse(
         parts.map((p) => ({ title: p.title, bytes: p.bytes })),
@@ -166,23 +262,28 @@ export class RequestUseCase {
         budget.maxBatchBytes,
       );
       await copyOrThrow(recovery, this.clipboard, this.terminal);
-      this.terminal.error(
+      errorLines.push(
         `${PRODUCT_NAME}: response over the total budget (${totalBytes} bytes > ${budget.maxBatchBytes}) — ` +
           `recovery response copied to the clipboard.`,
       );
-      return EXIT_FAILURE;
+      return { code: EXIT_FAILURE, response: recovery, infoLines, errorLines };
     }
     await copyOrThrow(response, this.clipboard, this.terminal);
 
     for (const title of failures) {
-      this.terminal.error(
+      errorLines.push(
         `${PRODUCT_NAME}: "${title}" produced no content — see the copied response for details.`,
       );
     }
-    this.terminal.info(
+    infoLines.push(
       `${PRODUCT_NAME}: processed request — ${parts.length} op(s) executed; ` +
         `${parts.length - failures.length} produced content; response copied to the clipboard.`,
     );
-    return produced ? EXIT_OK : EXIT_FAILURE;
+    return {
+      code: produced ? EXIT_OK : EXIT_FAILURE,
+      response,
+      infoLines,
+      errorLines,
+    };
   }
 }

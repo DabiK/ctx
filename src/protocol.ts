@@ -84,6 +84,88 @@ export type ParsedRequest =
     }
   | { ok: false; reason: string };
 
+/** The ok branch of {@link ParsedRequest}. */
+export type ParsedOkRequest = Extract<ParsedRequest, { ok: true }>;
+
+/** A write proposal: a multi-file patch, a full-file write, or a sequence. */
+export type Proposal =
+  | ProposalOp
+  | { kind: "sequence"; write: ProposalOp; verify: ReadOp[] };
+
+/** True when the parsed request is a standalone write proposal (or a sequence). */
+export function isProposalRequest(parsed: ParsedOkRequest): boolean {
+  return (
+    parsed.sequence ||
+    (parsed.ops.length === 1 &&
+      (parsed.ops[0]?.kind === "patch" || parsed.ops[0]?.kind === "write"))
+  );
+}
+
+/** The single write proposal of a parsed request, or `null`. */
+export function singleProposal(parsed: ParsedOkRequest): Proposal | null {
+  const op = parsed.ops[0];
+  if (op === undefined) {
+    return null;
+  }
+  if (isProposalOp(op) || op.kind === "sequence") {
+    return op;
+  }
+  return null;
+}
+
+/** Short human-readable label of a read operation (e.g. `file src/foo.ts`). */
+export function describeReadOp(op: ReadOp): string {
+  switch (op.kind) {
+    case "file":
+      return `file ${op.specs[0] ?? ""}`;
+    case "files":
+      return `files ${op.specs.join(" ")}`;
+    case "tree":
+      return "tree";
+    case "glob":
+      return `glob ${op.pattern}`;
+    case "inspect":
+      return "inspect";
+    case "search":
+      return `search ${op.query}`;
+    case "status":
+      return "status";
+    case "changed":
+      return "changed";
+    case "diff":
+      return "diff";
+    case "log":
+      return "log";
+    case "show":
+      return `show ${op.rev} ${op.path}`;
+  }
+}
+
+/**
+ * Parse a single TUI command-entry line into a read operation (pure). The
+ * watcher command entry accepts the same read operations as the direct CLI
+ * commands; write proposals and batches are not command-entry commands.
+ */
+export function parseCommandOp(
+  text: string,
+): { ok: true; op: ReadOp } | { ok: false; reason: string } {
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    return { ok: false, reason: "empty command" };
+  }
+  const tokens = trimmed.split(/\s+/);
+  const op = tokens[0] ?? "";
+  const args = tokens.slice(1);
+  const parsed = parseReadOp(op, args);
+  if ("unsupported" in parsed) {
+    return { ok: false, reason: `unsupported command \`${op}\`` };
+  }
+  if (!parsed.ok) {
+    return { ok: false, reason: parsed.reason };
+  }
+  return { ok: true, op: parsed.op };
+}
+
 /** Supported operations in this build, for refusal responses. */
 export const SUPPORTED_OPS =
   "batch (a block of @ctx read operations), file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], search <query>, status, changed [path], diff [--staged] [path], log [--limit N] [path], show <rev> <path>, patch (a unified multi-file diff body), write <path> (a full-file body), and sequence (one write proposal followed by verification reads)";

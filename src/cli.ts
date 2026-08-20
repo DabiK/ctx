@@ -19,14 +19,17 @@ import { PromptUseCase } from "./application/prompt.js";
 import { ReadUseCase } from "./application/read.js";
 import { RequestUseCase } from "./application/request.js";
 import { SearchUseCase } from "./application/search.js";
+import { WatchUseCase } from "./application/watch.js";
 import { WriteUseCase } from "./application/write.js";
 import { isSafeRevision, isSafeShowPath } from "./protocol.js";
 import { SystemClipboard } from "./platform/clipboard.js";
+import { SystemClock } from "./platform/clock.js";
 import { SystemEnv } from "./platform/env.js";
 import { SystemFs } from "./platform/fs.js";
 import { SystemGit } from "./platform/git.js";
 import { createSearchPort } from "./platform/search.js";
 import { SystemTerminal } from "./platform/terminal.js";
+import { SystemTui } from "./platform/tui.js";
 
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
@@ -48,7 +51,8 @@ type Command =
   | "diff"
   | "log"
   | "show"
-  | "apply";
+  | "apply"
+  | "watch";
 
 interface ParsedArgs {
   command: Command | null;
@@ -88,6 +92,7 @@ function usage(): string {
     `  show      Print one file's content at a revision (git show rev:path).`,
     `  read      Execute the @ctx request in the clipboard and copy the response back.`,
     `  apply     Apply the tagged patch/write/sequence proposal in the clipboard.`,
+    `  watch     Foreground clipboard watcher TUI (safe/auto modes).`,
     `  help      Show this help.`,
     ``,
     `Options:`,
@@ -307,6 +312,26 @@ function commandHelp(command: Command): string {
         `Options:`,
         `  --allow-sensitive   Permit writing sensitive paths/content for this run.`,
       ].join("\n");
+    case "watch":
+      return [
+        `Usage: ${EXECUTABLE_NAME} watch [--allow-sensitive]`,
+        ``,
+        `Launch the foreground clipboard watcher TUI. It observes clipboard`,
+        `changes, ignores ${PRODUCT_NAME}'s own responses and duplicate clipboard`,
+        `content (loop prevention), and surfaces tagged @ctx patch/write/sequence`,
+        `proposals as pending writes for an explicit action.`,
+        ``,
+        `Keys: m toggle mode (safe/auto), e command entry, a apply pending write,`,
+        `c cancel pending write, p preview pending write, q quit.`,
+        ``,
+        `Safe mode confirms read requests and proposed writes; auto mode runs`,
+        `valid reads automatically but keeps writes awaiting an explicit action.`,
+        `The command entry executes supported read operations and copies their`,
+        `structured response.`,
+        ``,
+        `Options:`,
+        `  --allow-sensitive   Permit sensitive path/content disclosure for this run.`,
+      ].join("\n");
   }
 }
 
@@ -395,6 +420,7 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
     command !== "log" &&
     command !== "show" &&
     command !== "apply" &&
+    command !== "watch" &&
     command !== "help"
   ) {
     return { error: `Unknown command: ${command}` };
@@ -462,6 +488,7 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
       command === "doctor" ||
       command === "read" ||
       command === "apply" ||
+      command === "watch" ||
       command === "tree" ||
       command === "status") &&
     parsed.args.length > 0
@@ -597,6 +624,12 @@ export async function runCli(argv: string[], ports: PlatformPorts): Promise<numb
         allowSensitive: parsed.allowSensitive,
       });
     }
+    case "watch": {
+      const { clipboard, terminal, git, fs, search, tui, clock } = ports;
+      return new WatchUseCase(clipboard, terminal, git, fs, search, tui, clock).watch({
+        allowSensitive: parsed.allowSensitive,
+      });
+    }
   }
 }
 
@@ -635,6 +668,8 @@ export async function main(argv: string[]): Promise<number> {
     fs: new SystemFs(),
     env,
     search: createSearchPort(env),
+    tui: new SystemTui(),
+    clock: new SystemClock(),
   };
   return runCli(argv, ports);
 }

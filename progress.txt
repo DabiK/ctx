@@ -231,3 +231,59 @@
   full-write preview/apply, sequence apply with verification reads, and
   sensitive/traversal refusals.
 
+## 2026-08-20 — #8 Watcher TUI: safe and auto
+
+- Added the foreground `ctx watch` mini-TUI in safe and auto modes through the
+  same hexagonal boundary. The new `WatchUseCase` (`src/application/watch.ts`)
+  is the application logic: a loop that polls the clipboard on a clock tick,
+  handles keys, and renders through the TUI port.
+- New application ports (`src/application/ports.ts`): `ClockPort` (deterministic
+  `now()` and `pollIntervalMs()` for tick cadence and event timestamps) and
+  `TuiPort` (`open`/`render`/`nextKey`/`readLine`/`confirm`/`showDetail`/`close`)
+  with the shared `WatchMode`, `WatchEvent`, `PendingWrite`, and `WatcherView`
+  contracts. Infrastructure adapters: `SystemClock` (`src/platform/clock.ts`)
+  and `SystemTui` (`src/platform/tui.ts`, raw-mode keyboard input + ANSI frames,
+  no external dependencies). Both are wired into `PlatformPorts`/`main` and the
+  new `ctx watch` CLI command (`--allow-sensitive`, help, parse rules).
+- Loop prevention: `fnv1a` (pure FNV-1a hash in `common.ts`) detects duplicate
+  clipboard content; content starting with `# CTX RESPONSE` is logged as an
+  ignored own response. Malformed requests get a structured refusal copied
+  (never executed), matching `ctx read` behavior.
+- Read requests: safe mode confirms each request (`y/n`); auto mode runs valid
+  reads automatically. Both execute through the shared `RequestUseCase.execute`
+  path and copy the identical response the CLI produces.
+- Write proposals (`@ctx patch`/`write`/`sequence`): surfaced as pending writes
+  in the TUI with label, targets, status note, and full preview text — the
+  proposal stays untouched in the clipboard. `p` previews (full-screen detail),
+  `c` cancels, and `a` applies through the explicit action only (in both modes;
+  safe mode additionally confirms detection and application). Applying runs
+  through the shared `WriteUseCase.applyParsed` path, so sequence verification
+  reads still run only after the write succeeds.
+- Command entry (`e`): executes supported read operations via a new pure
+  `parseCommandOp` in `protocol.ts` (same parser as the protocol read ops) and
+  automatically copies their structured response.
+- Refactors for reuse without a god service: `RequestUseCase` gained a public
+  `execute(parsed, opts)` that runs a parsed request end-to-end (config,
+  budgets, legacy/combined/batch envelopes, fail-closed recovery) and returns
+  the copied response plus report lines the caller surfaces on its own channel
+  (terminal for `ctx read`, TUI events for the watcher); `WriteUseCase` gained
+  `previewParsed` (validate + build preview/refusal text without copying) and
+  `applyParsed` (validate + apply + verify + copy), used by both the CLI
+  `apply`/`read` commands and the watcher. `Proposal`, `ParsedOkRequest`,
+  `isProposalRequest`, `singleProposal`, and `describeReadOp` moved to
+  `protocol.ts` so the application layer shares one definition.
+- Tests: `FakeClock` and `FakeTui` (scripted keys/confirms/readLines, views
+  recorded) added to `fakes.ts`; a new `watch.test.ts` suite covers
+  not-a-repo refusal, clean start/quit, own-response and duplicate-hash loop
+  prevention, safe-mode confirm/decline, auto-mode automatic reads, batch
+  polling, command entry (success + refusal), proposal surfacing without
+  overwriting the clipboard, preview, apply (auto + safe-confirmed), cancel,
+  sequence apply with post-write verification, mode transitions in the view,
+  and clock timestamps. CLI tests cover `watch` parsing, help, and a clean
+  `runCli(["watch"])` run. 296 tests pass; typecheck clean.
+- Verified the packaged CLI manually on macOS against the real system
+  clipboard: safe-mode read round trip (confirm → response copied), auto-mode
+  write proposal (surfaced pending → explicit `a` applied → file created +
+  `# CTX RESPONSE` copied), own-response loop prevention, `ctx read` batch
+  regression, and `ctx watch --help`.
+

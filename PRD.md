@@ -154,7 +154,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #3 Safe clipboard file context.
   >
 
-- [ ] #8 — Watcher TUI: safe and auto (labels: ready-for-agent)
+- [x] #8 — Watcher TUI: safe and auto (labels: ready-for-agent)
 
   **Issue #8 — détail complet**
   > ## Parent
@@ -167,11 +167,11 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   >
   > ## Acceptance criteria
   >
-  > - [ ] `ctx watch` launches a keyboard-operable foreground TUI showing mode, recent events, pending proposed writes, and the latest copied response.
-  > - [ ] Safe mode confirms read requests and proposed writes; auto mode runs valid reads automatically but keeps writes awaiting an explicit TUI action.
-  > - [ ] The TUI command entry executes supported read operations and automatically copies their structured response.
-  > - [ ] Watcher loop prevention ignores `# CTX RESPONSE` and duplicate clipboard hashes.
-  > - [ ] Deterministic watcher/TUI tests use fake clipboard and clock ports to cover events, mode transitions, pending-write preview, application, and cancellation.
+  > - [x] `ctx watch` launches a keyboard-operable foreground TUI showing mode, recent events, pending proposed writes, and the latest copied response.
+  > - [x] Safe mode confirms read requests and proposed writes; auto mode runs valid reads automatically but keeps writes awaiting an explicit TUI action.
+  > - [x] The TUI command entry executes supported read operations and automatically copies their structured response.
+  > - [x] Watcher loop prevention ignores `# CTX RESPONSE` and duplicate clipboard hashes.
+  > - [x] Deterministic watcher/TUI tests use fake clipboard and clock ports to cover events, mode transitions, pending-write preview, application, and cancellation.
   >
   > ## Blocked by
   >

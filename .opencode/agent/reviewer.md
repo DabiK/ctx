@@ -1,6 +1,6 @@
 ---
 description: Reviewer ctx — review read-only for the ctx Ralph loop.
-mode: subagent
+mode: primary
 model: opencode-go/deepseek-v4-flash
 variant: max
 permission:
@@ -26,4 +26,3 @@ End with exactly one verdict:
 
 - `<promise>APPROVED</promise>` when the requested task is complete and verified.
 - `<promise>REJECTED</promise>` followed by a numbered, concrete list of only the blocking missing work.
-

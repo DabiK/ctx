@@ -143,11 +143,11 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   >
   > ## Acceptance criteria
   >
-  > - [x] A tagged multi-file patch is recognised separately from ordinary `ctx diff` read output and is preflighted before any file changes.
-  > - [x] A valid full-file write creates or replaces only a validated non-sensitive path; missing parent directories are created as part of the accepted operation.
-  > - [x] Invalid patches and denied writes change no files and produce a structured diagnostic for the LLM/user.
-  > - [x] A sequence runs its verification reads only after the proposed patch/write succeeds; failures skip later steps and report why.
-  > - [x] Integration tests cover patch success/failure, multiple files, full writes, sensitive-write refusal, and sequence conditional behavior in a temporary Git repository.
+  > - [ ] A tagged multi-file patch is recognised separately from ordinary `ctx diff` read output and is preflighted before any file changes.
+  > - [ ] A valid full-file write creates or replaces only a validated non-sensitive path; missing parent directories are created as part of the accepted operation.
+  > - [ ] Invalid patches and denied writes change no files and produce a structured diagnostic for the LLM/user.
+  > - [ ] A sequence runs its verification reads only after the proposed patch/write succeeds; failures skip later steps and report why.
+  > - [ ] Integration tests cover patch success/failure, multiple files, full writes, sensitive-write refusal, and sequence conditional behavior in a temporary Git repository.
   >
   > ## Blocked by
   >
@@ -167,11 +167,11 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   >
   > ## Acceptance criteria
   >
-  > - [x] `ctx watch` launches a keyboard-operable foreground TUI showing mode, recent events, pending proposed writes, and the latest copied response.
-  > - [x] Safe mode confirms read requests and proposed writes; auto mode runs valid reads automatically but keeps writes awaiting an explicit TUI action.
-  > - [x] The TUI command entry executes supported read operations and automatically copies their structured response.
-  > - [x] Watcher loop prevention ignores `# CTX RESPONSE` and duplicate clipboard hashes.
-  > - [x] Deterministic watcher/TUI tests use fake clipboard and clock ports to cover events, mode transitions, pending-write preview, application, and cancellation.
+  > - [ ] `ctx watch` launches a keyboard-operable foreground TUI showing mode, recent events, pending proposed writes, and the latest copied response.
+  > - [ ] Safe mode confirms read requests and proposed writes; auto mode runs valid reads automatically but keeps writes awaiting an explicit TUI action.
+  > - [ ] The TUI command entry executes supported read operations and automatically copies their structured response.
+  > - [ ] Watcher loop prevention ignores `# CTX RESPONSE` and duplicate clipboard hashes.
+  > - [ ] Deterministic watcher/TUI tests use fake clipboard and clock ports to cover events, mode transitions, pending-write preview, application, and cancellation.
   >
   > ## Blocked by
   >
@@ -194,42 +194,17 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   >
   > ## Acceptance criteria
   >
-  > - [x] The selected mode is persisted in user-local configuration, outside the repository, and restored by a later watcher session.
-  > - [x] In yolo, valid non-sensitive patch and full-write proposals display a cancellable three-second countdown and apply only after it completes.
-  > - [x] Sensitive writes remain blocked even in yolo unless the explicit sensitive-write override is provided.
-  > - [x] Optional notifications report request completion and pending/applied write events without replacing TUI diagnostics.
-  > - [x] Tests cover persisted mode restore, countdown completion/cancellation, sensitive-write refusal, and notification-port behavior with fakes.
+  > - [ ] The selected mode is persisted in user-local configuration, outside the repository, and restored by a later watcher session.
+  > - [ ] In yolo, valid non-sensitive patch and full-write proposals display a cancellable three-second countdown and apply only after it completes.
+  > - [ ] Sensitive writes remain blocked even in yolo unless the explicit sensitive-write override is provided.
+  > - [ ] Optional notifications report request completion and pending/applied write events without replacing TUI diagnostics.
+  > - [ ] Tests cover persisted mode restore, countdown completion/cancellation, sensitive-write refusal, and notification-port behavior with fakes.
   >
   > ## Blocked by
   >
   > - #8 Watcher TUI safe and auto.
   >
 
-- [x] #11 — OpenTUI watcher interface (labels: ready-for-agent)
-
-  **Issue #11 — détail complet**
-  > ## Parent
-  >
-  > Implements part of #1.
-  >
-  > ## What to build
-  >
-  > Replace the hand-rendered watcher terminal interface with a polished, keyboard-operable OpenTUI interface. Preserve the watcher, clipboard, write, security, and application-use-case behaviour: this is a platform rendering-adapter migration, not a workflow rewrite. The interface must make mode, recent activity, pending proposal, preview, yolo countdown, and available actions immediately legible on macOS and Windows terminals.
-  >
-  > ## Acceptance criteria
-  >
-  > - [ ] `ctx watch` renders through OpenTUI with a responsive full-screen layout: clear status/mode header, recent activity, pending write state, and persistent keyboard-help area.
-  > - [ ] Safe, auto, and persisted yolo mode are visually distinct; a yolo countdown is visible and cancellation remains obvious.
-  > - [ ] Pending patch/write previews are readable without losing the proposal or its target summary.
-  > - [ ] All existing keyboard actions remain operable and their focus/selection state is visible.
-  > - [ ] A dedicated TUI action copies the same startup protocol as `ctx prompt`, including root `AGENTS.md` when present, without creating or overwriting `.ctx.toml` or `.ctxignore`.
-  > - [ ] The application layer and watcher policy remain independent of OpenTUI; OpenTUI stays in a replaceable platform adapter.
-  > - [ ] Tests preserve deterministic watcher behaviour through the existing TUI port/fake, and a manual smoke path documents rendering on macOS and Windows.
-  >
-  > ## Blocked by
-  >
-  > - #9 Yolo user mode and notifications.
-  >
 - [ ] #10 — Package, cross-platform CI and E2E (labels: ready-for-agent)
 
   **Issue #10 — détail complet**
@@ -258,3 +233,28 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #7 Controlled writes and sequences.
   > - #9 Yolo user mode and notifications.
   >
+
+- [x] #11 — OpenTUI watcher interface (labels: ready-for-agent)
+
+  **Issue #11 — détail complet**
+  > ## Parent
+  >
+  > Implements part of #1.
+  >
+  > ## What to build
+  >
+  > Replace the current hand-rendered watcher terminal interface with a polished, keyboard-operable OpenTUI interface. Preserve the existing watcher, clipboard, write, security, and application-use-case behaviour: this is a platform rendering-adapter migration, not a workflow rewrite. The interface must make mode, recent activity, pending proposal, preview, yolo countdown, and available actions immediately legible on macOS and Windows terminals.
+  >
+  > ## Acceptance criteria
+  >
+  > - [ ] `ctx watch` renders through OpenTUI with a responsive full-screen layout: clear status/mode header, recent activity, pending write state, and persistent keyboard-help area.
+  > - [ ] Safe, auto, and persisted yolo mode are visually distinct; a yolo countdown is visible and cancellation remains obvious.
+  > - [ ] Pending patch/write previews are readable without losing the proposal or its target summary.
+  > - [ ] All existing keyboard actions remain operable and their focus/selection state is visible.
+  > - [ ] A dedicated TUI action copies the same startup protocol as `ctx prompt`, including root `AGENTS.md` when present, without creating or overwriting `.ctx.toml` or `.ctxignore`.
+  > - [ ] The application layer and watcher policy remain independent of OpenTUI; OpenTUI stays in a replaceable platform adapter.
+  > - [ ] Tests preserve deterministic watcher behaviour through the existing TUI port/fake, and a manual smoke path documents rendering on macOS and Windows.
+  >
+  > ## Blocked by
+  >
+  > - #9 Yolo user mode and notifications.

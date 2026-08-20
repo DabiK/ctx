@@ -205,7 +205,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #8 Watcher TUI safe and auto.
   >
 
-- [ ] #11 — OpenTUI watcher interface (labels: ready-for-agent)
+- [x] #11 — OpenTUI watcher interface (labels: ready-for-agent)
 
   **Issue #11 — détail complet**
   > ## Parent

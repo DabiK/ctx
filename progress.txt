@@ -340,3 +340,41 @@
   under `--allow-sensitive`; the Windows PowerShell notification command and
   the config file round trip were verified via the packaged adapter modules.
 
+
+## 2026-08-20 — #11 OpenTUI watcher interface
+
+- Migrated the watcher terminal interface to OpenTUI (`@opentui/core`), a
+  native Zig-core full-screen terminal UI with Flexbox layout. The migration
+  is a platform rendering-adapter change only: every OpenTUI call lives in
+  `SystemTui` (`src/platform/tui.ts`) behind the existing `TuiPort` contract,
+  and `WatchUseCase` keeps driving the loop through application ports.
+- `SystemTui` builds a responsive full-screen Flexbox column — status/mode
+  header (safe/auto/yolo color-coded, yolo countdown line), recent activity,
+  pending proposed writes, latest copied response, and a persistent
+  keyboard-help footer — with confirm rows, the command entry (`InputRenderable`),
+  and a full-screen preview overlay. `keyToText` maps OpenTUI `KeyEvent`s to
+  the same raw strings the fake TUI scripts, so watcher behaviour stays
+  deterministic in the unit suites. OpenTUI loads its native library through
+  FFI: supported runtimes are Bun 1.3+ and Node.js 26.4.0 exactly
+  (`--experimental-ffi`); elsewhere `open()` throws an actionable prerequisite
+  message and `ctx watch` exits non-zero (documented in the CLI help and in
+  `docs/smoke-opentui.md`, the macOS/Windows manual smoke path).
+- Dedicated prompt action (PRD #11 review gap): the new `i` key copies the
+  same startup protocol as `ctx prompt` — the generated protocol plus the
+  repository-root AGENTS.md when present (or its reported absence) — through
+  the shared `buildClipboardPayload`, without creating or overwriting
+  `.ctx.toml`/`.ctxignore` or any other project file. The copied payload's
+  hash is recorded for loop prevention, so the watcher never re-executes the
+  prompt's own `@ctx` examples on the next poll. The key appears in the TUI
+  footer (`[i] prompt`) and in the `watch` help; failures log an event and
+  never crash the loop; a notification reports the copy.
+- Tests: four new `WatchUseCase` suites with fakes (prompt action copies
+  protocol + root AGENTS.md verbatim and touches neither config file,
+  AGENTS.md-absence report, copied-prompt loop prevention on the next poll,
+  and copy-failure resilience). 308 tests pass; typecheck clean.
+- Verified the packaged CLI manually on macOS in a real PTY (`expect`) with
+  Bun 1.3.11 against the real system clipboard: the OpenTUI layout renders
+  with the `[i] prompt` footer, pressing `i` copies the full startup protocol
+  including the root AGENTS.md verbatim (and the absence report when absent),
+  several subsequent polls leave the prompt untouched on the clipboard
+  (loop prevention), and no `.ctx.toml`/`.ctxignore` appears in the repo.

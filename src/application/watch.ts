@@ -12,7 +12,10 @@
  * TUI command entry executes supported read operations and automatically
  * copies their structured response; optional desktop notifications report
  * request completion and pending/applied write events without replacing TUI
- * diagnostics.
+ * diagnostics. A dedicated prompt action copies the same startup protocol as
+ * `ctx prompt` — the generated protocol plus the repository-root AGENTS.md
+ * when present (or its reported absence) — without creating or overwriting
+ * `.ctx.toml`/`.ctxignore` or any other project file.
  *
  * The loop is driven exclusively through application ports: clipboard, git,
  * fs, search, terminal, the TUI port (rendering and keyboard input), the
@@ -34,7 +37,15 @@ import {
   type ParsedOkRequest,
   type Proposal,
 } from "../protocol.js";
-import { copyOrThrow, EXIT_FAILURE, EXIT_OK, fnv1a, requireGitRoot } from "./common.js";
+import {
+  buildClipboardPayload,
+  copyOrThrow,
+  EXIT_FAILURE,
+  EXIT_OK,
+  fnv1a,
+  requireGitRoot,
+  utf8ByteLength,
+} from "./common.js";
 import { RequestUseCase } from "./request.js";
 import { buildRefusalResponse } from "./response.js";
 import { WriteUseCase, type ApplyOutcome, type PreviewOutcome } from "./write.js";
@@ -77,7 +88,7 @@ function footerHint(mode: WatchMode): string {
     mode === "yolo"
       ? `[m] mode (yolo: valid writes auto-apply after ${YOLO_COUNTDOWN_SECONDS}s)`
       : `[m] mode (${mode})`;
-  return `${modeHint}  [e] command  [a] apply pending  [c] cancel  [p] preview  [q] quit`;
+  return `${modeHint}  [e] command  [a] apply pending  [c] cancel  [p] preview  [i] prompt  [q] quit`;
 }
 
 export class WatchUseCase {
@@ -87,6 +98,7 @@ export class WatchUseCase {
   private lastSeenHash: string | null = null;
   private stopped = false;
   private mode: WatchMode = "safe";
+  private repoRoot = "";
   private readonly events: WatchEvent[] = [];
   private readonly pendingWrites: PendingWrite[] = [];
   private latestResponse: string | null = null;
@@ -119,6 +131,7 @@ export class WatchUseCase {
     if (root === null) {
       return EXIT_FAILURE;
     }
+    this.repoRoot = root;
     this.mode = this.userConfig.readMode() ?? "safe";
     this.allowSensitive = opts.allowSensitive;
     this.tui.open();
@@ -385,6 +398,30 @@ export class WatchUseCase {
     return true;
   }
 
+  /**
+   * The dedicated prompt action (`i`): copy the same startup protocol as
+   * `ctx prompt` — the generated protocol plus the repository-root AGENTS.md
+   * when present (or its reported absence). It never creates or overwrites
+   * `.ctx.toml`/`.ctxignore` or any other project file. The copied payload's
+   * hash is recorded for loop prevention so the watcher never re-executes the
+   * prompt it just copied (it contains `@ctx` examples, which must stay
+   * documentation, not requests).
+   */
+  private async copyProtocolPrompt(): Promise<void> {
+    const payload = buildClipboardPayload(this.repoRoot, this.fs, false);
+    try {
+      await this.clipboard.copy(payload);
+    } catch (err) {
+      const detail = err instanceof Error ? `: ${err.message}` : "";
+      this.logEvent(`Protocol prompt copy failed${detail}.`);
+      return;
+    }
+    this.lastSeenHash = fnv1a(payload);
+    const bytes = utf8ByteLength(payload);
+    this.logEvent(`Startup protocol copied to the clipboard (${bytes} bytes).`);
+    this.notify("Protocol prompt copied", `${bytes} bytes on the clipboard.`);
+  }
+
   /** The TUI command entry: run a supported read command and copy its response. */
   private async commandEntry(): Promise<void> {
     const line = await this.tui.readLine(`${EXECUTABLE_NAME} > `);
@@ -448,6 +485,11 @@ export class WatchUseCase {
     }
     if (k === "p") {
       await this.previewPendingWrite();
+      return;
+    }
+    if (k === "i") {
+      await this.copyProtocolPrompt();
+      return;
     }
   }
 

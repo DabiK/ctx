@@ -3,15 +3,16 @@
  * ports. Covers loop prevention (own responses and duplicate hashes), safe,
  * auto, and yolo mode behavior, persisted-mode restore, the yolo countdown
  * (completion and cancellation), sensitive-write refusal in yolo, the command
- * entry, pending-write surfacing, preview, application, cancellation,
- * notifications, and quit.
+ * entry, the dedicated prompt action (copies the startup protocol without
+ * touching `.ctx.toml`/`.ctxignore`), pending-write surfacing, preview,
+ * application, cancellation, notifications, and quit.
  */
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { RESPONSE_MARKER } from "../branding.js";
-import { EXIT_FAILURE, EXIT_OK } from "../application/common.js";
+import { buildClipboardPayload, EXIT_FAILURE, EXIT_OK } from "../application/common.js";
 import { WatchUseCase } from "../application/watch.js";
 import { fakePorts } from "./fakes.js";
 import type { FakeFs, FakeGit } from "./fakes.js";
@@ -491,5 +492,69 @@ describe("WatchUseCase.watch", () => {
     assert.ok(completed?.body.includes("file src/app.ts"));
     // Notifications never replace TUI diagnostics.
     assert.ok(tui.lastView().events.some((e) => e.text.includes("processed request")));
+  });
+
+  it("copies the startup protocol with the dedicated prompt action, including the root AGENTS.md", async () => {
+    const { ports, clipboard, fs, tui, notifications } = fakePorts();
+    seedRepo(fs);
+    fs.seed(`${ROOT}/AGENTS.md`, "# Repo conventions\n\nUse tabs.\n");
+    tui.keys = ["i", "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("You are chatting with a developer who uses ctx"), "the protocol prompt is copied");
+    assert.ok(copied.includes("# Repository instructions"), "the AGENTS.md section is present");
+    assert.ok(copied.includes("--- AGENTS.md ---"));
+    assert.ok(copied.includes("Use tabs."), "the root AGENTS.md content is included verbatim");
+    assert.equal(fs.exists(`${ROOT}/.ctx.toml`), false, "no .ctx.toml is created");
+    assert.equal(fs.exists(`${ROOT}/.ctxignore`), false, "no .ctxignore is created");
+    assert.ok(tui.lastView().events.some((e) => e.text.includes("Startup protocol copied")));
+    assert.ok(notifications.notices.some((n) => n.title === "Protocol prompt copied"));
+  });
+
+  it("reports AGENTS.md absence in the copied startup protocol", async () => {
+    const { ports, clipboard, fs, tui } = fakePorts();
+    seedRepo(fs); // no AGENTS.md at the repository root
+    tui.keys = ["i", "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("You are chatting with a developer who uses ctx"));
+    assert.ok(copied.includes("No AGENTS.md file is present at the repository root."));
+    assert.equal(fs.exists(`${ROOT}/AGENTS.md`), false, "the absence report is not a file");
+  });
+
+  it("ignores the copied protocol prompt on the next poll (loop prevention)", async () => {
+    const { ports, clipboard, fs, tui } = fakePorts();
+    seedRepo(fs);
+    // The clipboard holds exactly the payload the action copies (it contains
+    // @ctx examples that must stay documentation, never re-executed requests).
+    clipboard.content = buildClipboardPayload(ROOT, fs, false);
+    tui.keys = ["i", null, null, "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(clipboard.copied.length, 1, "only the prompt was copied; the example @ctx file src/foo.ts never ran");
+    assert.equal(
+      tui.lastView().events.some((e) => e.text.includes("processed request")),
+      false,
+      "the copied prompt was ignored as duplicate clipboard content",
+    );
+  });
+
+  it("logs a failure event when the protocol prompt copy fails and keeps watching", async () => {
+    const { ports, clipboard, tui } = fakePorts();
+    clipboard.failWith = new Error("clipboard unavailable");
+    tui.keys = ["i", "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK, "a copy failure never crashes the watcher loop");
+    assert.ok(tui.lastView().events.some((e) => e.text.includes("Protocol prompt copy failed")));
   });
 });

@@ -222,6 +222,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - [ ] Safe, auto, and persisted yolo mode are visually distinct; a yolo countdown is visible and cancellation remains obvious.
   > - [ ] Pending patch/write previews are readable without losing the proposal or its target summary.
   > - [ ] All existing keyboard actions remain operable and their focus/selection state is visible.
+  > - [ ] A dedicated TUI action copies the same startup protocol as `ctx prompt`, including root `AGENTS.md` when present, without creating or overwriting `.ctx.toml` or `.ctxignore`.
   > - [ ] The application layer and watcher policy remain independent of OpenTUI; OpenTUI stays in a replaceable platform adapter.
   > - [ ] Tests preserve deterministic watcher behaviour through the existing TUI port/fake, and a manual smoke path documents rendering on macOS and Windows.
   >

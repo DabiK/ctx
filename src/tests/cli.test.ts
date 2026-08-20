@@ -20,6 +20,9 @@ describe("parseArgs", () => {
       version: false,
       force: false,
       compact: false,
+      copy: false,
+      allowSensitive: false,
+      args: [],
     });
   });
 
@@ -35,10 +38,33 @@ describe("parseArgs", () => {
     assert.equal(p.parsed.compact, true);
   });
 
-  it("rejects unknown commands and options", () => {
+  it("parses file/files commands with paths and read options", () => {
+    const f = parseArgs(["file", "src/foo.ts:10-20", "--copy", "--allow-sensitive"]);
+    assert.ok(!("error" in f));
+    assert.equal(f.parsed.command, "file");
+    assert.deepEqual(f.parsed.args, ["src/foo.ts:10-20"]);
+    assert.equal(f.parsed.copy, true);
+    assert.equal(f.parsed.allowSensitive, true);
+
+    const fs2 = parseArgs(["files", "a.ts", "b.ts", "-c"]);
+    assert.ok(!("error" in fs2));
+    assert.equal(fs2.parsed.command, "files");
+    assert.deepEqual(fs2.parsed.args, ["a.ts", "b.ts"]);
+    assert.equal(fs2.parsed.copy, true);
+
+    const r = parseArgs(["read"]);
+    assert.ok(!("error" in r));
+    assert.equal(r.parsed.command, "read");
+  });
+
+  it("rejects unknown commands, options, and wrong path counts", () => {
     assert.ok("error" in parseArgs(["explode"]));
     assert.ok("error" in parseArgs(["init", "--nope"]));
     assert.ok("error" in parseArgs(["init", "extra"]));
+    assert.ok("error" in parseArgs(["file"]));
+    assert.ok("error" in parseArgs(["file", "a.ts", "b.ts"]));
+    assert.ok("error" in parseArgs(["files"]));
+    assert.ok("error" in parseArgs(["read", "extra"]));
   });
 
   it("treats help as a command and supports --help", () => {
@@ -59,8 +85,8 @@ describe("runCli", () => {
     assert.ok(terminal.infoLines.join("\n").includes("Usage:"));
   });
 
-  it("provides help for init, prompt, and doctor", async () => {
-    for (const cmd of ["init", "prompt", "doctor"]) {
+  it("provides help for init, prompt, doctor, file, files, and read", async () => {
+    for (const cmd of ["init", "prompt", "doctor", "file", "files", "read"]) {
       const { ports, terminal } = fakePorts();
       const code = await runCli([cmd, "--help"], ports);
       assert.equal(code, 0);
@@ -113,5 +139,42 @@ describe("runCli", () => {
 
     assert.equal(code, 0);
     assert.ok(terminal.infoLines.join("\n").includes("all checks passed"));
+  });
+
+  it("runs file through the CLI: prints content, copies only with --copy", async () => {
+    const { ports, terminal, clipboard, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "line one\nline two\nline three\n");
+
+    const code = await runCli(["file", "src/app.ts:2-3"], ports);
+
+    assert.equal(code, 0);
+    assert.ok(terminal.infoLines.join("\n").includes("line two"));
+    assert.ok(terminal.infoLines.join("\n").includes("read 2-3 of 3 lines"));
+    assert.equal(clipboard.lastCopied(), null, "no copy without --copy");
+
+    const code2 = await runCli(["file", "src/app.ts", "--copy"], ports);
+    assert.equal(code2, 0);
+    assert.ok((clipboard.lastCopied() ?? "").includes(RESPONSE_MARKER));
+  });
+
+  it("runs files through the CLI and refuses when nothing is readable", async () => {
+    const { ports, terminal } = fakePorts();
+
+    const code = await runCli(["files", "missing.ts"], ports);
+
+    assert.equal(code, 1);
+    assert.ok(terminal.errorLines.join("\n").includes("missing.ts"));
+  });
+
+  it("runs read through the CLI: clipboard request to copied response", async () => {
+    const { ports, clipboard, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "hello ctx\n");
+    clipboard.content = "@ctx file src/app.ts";
+
+    const code = await runCli(["read"], ports);
+
+    assert.equal(code, 0);
+    assert.ok((clipboard.lastCopied() ?? "").includes(RESPONSE_MARKER));
+    assert.ok((clipboard.lastCopied() ?? "").includes("hello ctx"));
   });
 });

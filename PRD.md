@@ -30,7 +30,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   >
   > - None — can start immediately.
 
-- [ ] #3 — Safe clipboard file context (labels: ready-for-agent)
+- [x] #3 — Safe clipboard file context (labels: ready-for-agent)
 
   **Issue #3 — détail complet**
   > ## Parent

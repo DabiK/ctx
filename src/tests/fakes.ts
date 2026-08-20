@@ -15,12 +15,21 @@ import type {
 export class FakeClipboard implements ClipboardPort {
   copied: string[] = [];
   failWith: Error | null = null;
+  content = "";
+  failReadWith: Error | null = null;
 
   async copy(text: string): Promise<void> {
     if (this.failWith !== null) {
       throw this.failWith;
     }
     this.copied.push(text);
+  }
+
+  async read(): Promise<string> {
+    if (this.failReadWith !== null) {
+      throw this.failReadWith;
+    }
+    return this.content;
   }
 
   lastCopied(): string | null {
@@ -57,13 +66,17 @@ export class FakeGit implements GitPort {
 export class FakeFs implements FsPort {
   cwdValue = "/repo";
   files = new Map<string, string>();
+  /** Directories known to exist (the root always exists). */
+  dirs = new Set<string>(["/"]);
+  /** Symlinks: link path → resolved target path (POSIX-style). */
+  symlinks = new Map<string, string>();
 
   cwd(): string {
     return this.cwdValue;
   }
 
   exists(path: string): boolean {
-    return this.files.has(path);
+    return this.files.has(path) || this.dirs.has(path);
   }
 
   readText(path: string): string | null {
@@ -79,6 +92,58 @@ export class FakeFs implements FsPort {
    * always address files with forward slashes.
    */
   join(...parts: string[]): string {
+    return this.joinPosix(...parts);
+  }
+
+  resolve(path: string): string {
+    return this.joinPosix(this.cwdValue, path);
+  }
+
+  realpath(path: string): string | null {
+    const direct = this.symlinks.get(path);
+    const target = direct ?? path;
+    if (this.exists(target)) {
+      return target;
+    }
+    return null;
+  }
+
+  isDirectory(path: string): boolean {
+    return this.dirs.has(path);
+  }
+
+  isWithin(parent: string, child: string): boolean {
+    const base = parent === "/" ? "/" : parent.replace(/\/$/, "");
+    return child === base || child.startsWith(base + "/");
+  }
+
+  /** Convenience: seed a file (creating its parent directory). */
+  seed(path: string, content: string): void {
+    this.files.set(path, content);
+    this.seedDirsFor(path);
+  }
+
+  /** Convenience: declare a directory. */
+  seedDir(path: string): void {
+    this.dirs.add(path);
+    this.seedDirsFor(path + "/placeholder");
+  }
+
+  /** Convenience: register a symlink. */
+  seedSymlink(linkPath: string, target: string): void {
+    this.symlinks.set(linkPath, target);
+  }
+
+  private seedDirsFor(path: string): void {
+    const segments = path.split("/").filter((s) => s.length > 0);
+    let acc = "";
+    for (const segment of segments.slice(0, -1)) {
+      acc += "/" + segment;
+      this.dirs.add(acc);
+    }
+  }
+
+  private joinPosix(...parts: string[]): string {
     const nonEmpty = parts.filter((p) => p.length > 0);
     if (nonEmpty.length === 0) {
       return "";
@@ -86,11 +151,6 @@ export class FakeFs implements FsPort {
     const leading = (nonEmpty[0] ?? "").startsWith("/") ? "/" : "";
     const segments = nonEmpty.flatMap((p) => p.split(/[\\/]+/)).filter((s) => s.length > 0);
     return leading + segments.join("/");
-  }
-
-  /** Convenience: seed a file. */
-  seed(path: string, content: string): void {
-    this.files.set(path, content);
   }
 }
 

@@ -8,6 +8,8 @@
 export interface ClipboardPort {
   /** Copy `text` to the system clipboard. Rejects when unsupported. */
   copy(text: string): Promise<void>;
+  /** Read the current clipboard content. Rejects when unsupported. */
+  read(): Promise<string>;
 }
 
 /** Terminal output. Direct commands print concise output here. */
@@ -45,6 +47,21 @@ export interface FsPort {
    * belong to the filesystem adapter, not to application code.
    */
   join(...parts: string[]): string;
+  /** Absolute normalized path of `path` without resolving symlinks. */
+  resolve(path: string): string;
+  /**
+   * Resolve symlinks on `path` (the fully resolved target), or `null` when
+   * the path does not exist or cannot be resolved. The resolved target is
+   * used to enforce the allowed-root boundary.
+   */
+  realpath(path: string): string | null;
+  /** True when `path` is an existing directory. */
+  isDirectory(path: string): boolean;
+  /**
+   * True when `child` is `parent` itself or located under it. Both paths are
+   * expected to be absolute; platform containment semantics live here.
+   */
+  isWithin(parent: string, child: string): boolean;
 }
 
 /** Environment/OS capabilities. */

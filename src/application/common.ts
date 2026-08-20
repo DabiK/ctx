@@ -34,6 +34,14 @@ export function utf8ByteLength(text: string): number {
 }
 
 /**
+ * Deterministic approximate token estimate (~4 bytes per token, the common
+ * heuristic). Exported so budgets and response metadata stay consistent.
+ */
+export function estimateTokens(bytes: number): number {
+  return Math.max(1, Math.round(bytes / 4));
+}
+
+/**
  * Resolve the repository root or report an actionable error and return `null`.
  * Returns `EXIT_FAILURE` intent through `null`; callers stop early.
  */
@@ -80,8 +88,8 @@ export function buildClipboardPayload(root: string, fs: FsPort, compact: boolean
   return prompt + "\n\n" + section + "\n";
 }
 
-/** Copy `payload` to the clipboard and report the result on the terminal. */
-export async function copyPayload(
+/** Copy `payload` to the clipboard, reporting failures, without announcing. */
+export async function copyOrThrow(
   payload: string,
   clipboard: ClipboardPort,
   terminal: TerminalPort,
@@ -93,6 +101,15 @@ export async function copyPayload(
     terminal.error(`Failed to copy to the clipboard${detail}`);
     throw err;
   }
+}
+
+/** Copy `payload` to the clipboard and report the result on the terminal. */
+export async function copyPayload(
+  payload: string,
+  clipboard: ClipboardPort,
+  terminal: TerminalPort,
+): Promise<void> {
+  await copyOrThrow(payload, clipboard, terminal);
   const bytes = utf8ByteLength(payload);
   terminal.info(
     `Protocol prompt copied to the clipboard (${bytes} bytes). ` +

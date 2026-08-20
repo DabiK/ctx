@@ -1,12 +1,16 @@
 /**
  * Real clipboard adapter for macOS and Windows.
  *
- * macOS uses `pbcopy`. Windows uses PowerShell `Set-Clipboard`. Other
- * platforms are outside the MVP and reject with an actionable error.
+ * macOS uses `pbcopy` / `pbpaste`. Windows uses PowerShell `Set-Clipboard` /
+ * `Get-Clipboard`. Other platforms are outside the MVP and reject with an
+ * actionable error.
  */
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import type { ClipboardPort, EnvPort } from "../application/ports.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Write `input` to the stdin of a spawned process and await its exit. */
 function writeStdin(file: string, args: string[], input: string): Promise<void> {
@@ -35,7 +39,7 @@ function writeStdin(file: string, args: string[], input: string): Promise<void> 
   });
 }
 
-/** Clipboard that writes through the platform-native tool. */
+/** Clipboard that reads and writes through the platform-native tool. */
 export class SystemClipboard implements ClipboardPort {
   constructor(private readonly env: EnvPort) {}
 
@@ -52,6 +56,26 @@ export class SystemClipboard implements ClipboardPort {
         text,
       );
       return;
+    }
+    throw new Error(
+      `Clipboard is not supported on this platform (${platform}). ` +
+        `ctx supports macOS and Windows in the MVP.`,
+    );
+  }
+
+  async read(): Promise<string> {
+    const { platform } = this.env;
+    if (platform === "darwin") {
+      const { stdout } = await execFileAsync("pbpaste", [], { timeout: 10_000 });
+      return stdout;
+    }
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        { timeout: 10_000 },
+      );
+      return stdout;
     }
     throw new Error(
       `Clipboard is not supported on this platform (${platform}). ` +

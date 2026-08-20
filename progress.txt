@@ -22,3 +22,10 @@
 - Verified the packaged CLI on macOS: help/version, `init` (create + no
   overwrite without `--force`), `prompt --compact` (smaller prompt), `doctor`
   (ready exit 0; missing-prerequisite / no-repo exit 1 with actionable output).
+
+## 2026-08-20 — #3 Safe clipboard file context
+
+- Added the first clipboard context round trip: direct `file` / `files` reads and `read` for `@ctx` clipboard requests.
+- Added hexagonal domain/application modules for protocol parsing, project configuration, ignore matching, sensitive content detection, path guarding, stable responses, and read/request use cases.
+- Extended outbound adapters and fakes for clipboard reads and resolved filesystem boundary checks.
+- Verified `npm run typecheck` and `npm test`: 90 tests pass, including temporary-Git-repository integration coverage.

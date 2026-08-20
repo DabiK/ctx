@@ -260,6 +260,67 @@ export function buildCombinedResponse(parts: ResponsePart[]): string {
   return buildEnvelope(lines);
 }
 
+/**
+ * Batch envelope: the combined sections plus a summary header with the total
+ * byte/token metadata and the configured limits, so the LLM sees the budget
+ * it is working against in every batch response.
+ */
+export function buildBatchResponse(
+  parts: ResponsePart[],
+  maxBatchBytes: number,
+  perFileBytes: number,
+): string {
+  const bytes = parts.reduce((sum, part) => sum + part.bytes, 0);
+  const lines: string[] = [
+    "## Batch response",
+    `Operations: ${parts.length} | bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`,
+    `limits: total ≤ ${maxBatchBytes} bytes | per-file ≤ ${perFileBytes} bytes`,
+  ];
+  for (const part of parts) {
+    lines.push("", `## ${part.title}`);
+    lines.push(...part.lines);
+  }
+  return buildEnvelope(lines);
+}
+
+/** One requested section with its rendered size, used by the recovery response. */
+export interface CostlySection {
+  title: string;
+  bytes: number;
+}
+
+/**
+ * Structured recovery response copied instead of an oversized context: names
+ * the most expensive requested sections and asks the LLM to reduce scope.
+ * Fails closed — the full content is never copied nor silently truncated.
+ */
+export function buildRecoveryResponse(
+  sections: CostlySection[],
+  totalBytes: number,
+  maxBytes: number,
+): string {
+  const sorted = sections
+    .filter((s) => s.bytes > 0)
+    .sort((a, b) => b.bytes - a.bytes);
+  const lines: string[] = [
+    "## Response too large — reduce scope",
+    `The full response would be ${totalBytes} bytes, over the configured total budget ` +
+      `(max_batch_bytes = ${maxBytes} bytes), so it was not copied. This recovery response ` +
+      `was copied instead.`,
+  ];
+  if (sorted.length > 0) {
+    lines.push("", "Most expensive requested sections:");
+    for (const section of sorted.slice(0, 10)) {
+      lines.push(`- ${section.title}: ${section.bytes} bytes`);
+    }
+  }
+  lines.push(
+    "",
+    "Request fewer or smaller sections (smaller file ranges, narrower limits, fewer operations) and retry.",
+  );
+  return buildEnvelope(lines);
+}
+
 /** Count `status.files` per state bucket (returns 0 for missing buckets). */
 function countState(files: GitStatusFile[], state: GitStatusFile["state"]): number {
   return files.filter((f) => f.state === state).length;

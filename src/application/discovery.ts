@@ -13,7 +13,7 @@
  */
 
 import { CONFIG_FILE_NAME } from "../branding.js";
-import { parseProjectConfig, type ProjectConfig } from "../config.js";
+import { clampBatchBytes, parseProjectConfig, type ProjectConfig } from "../config.js";
 import { globToRegexSource } from "../ignore.js";
 import { containsSensitiveContent } from "../sensitive.js";
 import { PathGuard } from "./boundary.js";
@@ -60,6 +60,8 @@ export interface OpExecution {
   part: ResponsePart;
   /** True when the operation produced substantive content (drives exit codes). */
   produced: boolean;
+  /** Clamped total-response budget of the project, for the copy path. */
+  maxBatchBytes: number;
 }
 
 /** Repository context shared by all discovery walks. */
@@ -113,7 +115,11 @@ export class DiscoveryUseCase {
     const d = clampDepth(depth ?? ctx.config.treeDepth);
     const maxEntries = clampResults(ctx.config.maxResults);
     const walk = this.walkTree(ctx, d, maxEntries);
-    return { part: buildTreePart(walk, d, maxEntries), produced: walk.entryCount > 0 };
+    return {
+      part: buildTreePart(walk, d, maxEntries),
+      produced: walk.entryCount > 0,
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
+    };
   }
 
   /** Collect the glob block without copying/printing (used by the request use case). */
@@ -128,7 +134,11 @@ export class DiscoveryUseCase {
     }
     const maxResults = clampResults(limitOverride ?? ctx.config.maxResults);
     const walk = this.walkGlob(ctx, pattern, maxResults);
-    return { part: buildGlobPart(walk, pattern, maxResults), produced: walk.matches.length > 0 };
+    return {
+      part: buildGlobPart(walk, pattern, maxResults),
+      produced: walk.matches.length > 0,
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
+    };
   }
 
   /** Collect the inspect block without copying/printing (used by the request use case). */
@@ -166,6 +176,7 @@ export class DiscoveryUseCase {
     return {
       part: buildInspectPart(result, depth, maxEntries, scopeRefused),
       produced: scopeRefused === null && (tree.entryCount > 0 || files.length > 0),
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
     };
   }
 

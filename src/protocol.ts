@@ -6,10 +6,16 @@
  * `@ctx tree [--depth N]`, `@ctx glob <pattern>`, `@ctx inspect [path]`, and
  * `@ctx search <query>`, and the read-only Git context operations
  * `@ctx status`, `@ctx changed [path]`, `@ctx diff [--staged] [path]`,
- * `@ctx log [--limit N] [path]`, and `@ctx show <rev> <path>`. Everything
- * else is a structured refusal so the LLM receives a safe next request.
- * Non-`@ctx` lines (ordinary chat text) are ignored. Malformed inputs never
- * touch the filesystem or run any Git command.
+ * `@ctx log [--limit N] [path]`, and `@ctx show <rev> <path>`.
+ *
+ * `@ctx batch` composes several operations into one response: the `@ctx`
+ * lines that follow it (in declared order) are its members, so a batch is a
+ * flattened container, not a nested grammar. A batch must contain at least
+ * one operation and cannot contain another `@ctx batch` (malformed nesting is
+ * refused up front). Everything else is a structured refusal so the LLM
+ * receives a safe next request. Non-`@ctx` lines (ordinary chat text) are
+ * ignored. Malformed inputs never touch the filesystem or run any Git
+ * command.
  */
 
 import { REQUEST_MARKER } from "./branding.js";
@@ -36,12 +42,12 @@ export type RequestOp =
   | { kind: "show"; rev: string; path: string };
 
 export type ParsedRequest =
-  | { ok: true; ops: RequestOp[] }
+  | { ok: true; ops: RequestOp[]; /** True when the request used the `@ctx batch` container. */ batch: boolean }
   | { ok: false; reason: string };
 
 /** Supported operations in this build, for refusal responses. */
 export const SUPPORTED_OPS =
-  "file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], search <query>, status, changed [path], diff [--staged] [path], log [--limit N] [path], and show <rev> <path>";
+  "batch (a block of @ctx operations), file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], search <query>, status, changed [path], diff [--staged] [path], log [--limit N] [path], and show <rev> <path>";
 
 /**
  * True when `rev` is a safe, unambiguous Git revision for `show`: HEAD (with
@@ -176,6 +182,9 @@ export function parsePathSpec(spec: string): PathSpec {
 export function parseRequestText(text: string): ParsedRequest {
   const ops: RequestOp[] = [];
   let sawRequest = false;
+  let inBatch = false;
+  let sawBatch = false;
+  let batchMemberCount = 0;
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -193,6 +202,24 @@ export function parseRequestText(text: string): ParsedRequest {
     const tokens = rest.split(/\s+/);
     const op = tokens[0] ?? "";
     const args = tokens.slice(1);
+    if (op === "batch") {
+      if (args.length !== 0) {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} batch\` accepts no arguments (got: ${args.join(" ")})`,
+        };
+      }
+      if (inBatch) {
+        return {
+          ok: false,
+          reason:
+            `malformed nesting — \`${REQUEST_MARKER} batch\` cannot appear inside another batch`,
+        };
+      }
+      inBatch = true;
+      sawBatch = true;
+      continue;
+    }
     if (op === "file") {
       if (args.length !== 1) {
         return {
@@ -201,11 +228,13 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "file", specs: [args[0] ?? ""] });
+      if (inBatch) batchMemberCount++;
     } else if (op === "files") {
       if (args.length === 0) {
         return { ok: false, reason: `\`${REQUEST_MARKER} files\` requires at least one path` };
       }
       ops.push({ kind: "files", specs: args });
+      if (inBatch) batchMemberCount++;
     } else if (op === "tree") {
       let depth: number | null = null;
       if (args.length === 2 && (args[0] ?? "") === "--depth") {
@@ -224,6 +253,7 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "tree", depth });
+      if (inBatch) batchMemberCount++;
     } else if (op === "glob") {
       if (args.length !== 1) {
         return {
@@ -232,6 +262,7 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "glob", pattern: args[0] ?? "" });
+      if (inBatch) batchMemberCount++;
     } else if (op === "inspect") {
       if (args.length > 1) {
         return {
@@ -240,6 +271,7 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "inspect", path: args[0] ?? null });
+      if (inBatch) batchMemberCount++;
     } else if (op === "search") {
       if (args.length === 0) {
         return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires at least one query term` };
@@ -253,6 +285,7 @@ export function parseRequestText(text: string): ParsedRequest {
         return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires a non-empty query` };
       }
       ops.push({ kind: "search", query });
+      if (inBatch) batchMemberCount++;
     } else if (op === "status") {
       if (args.length !== 0) {
         return {
@@ -261,6 +294,7 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "status" });
+      if (inBatch) batchMemberCount++;
     } else if (op === "changed") {
       if (args.length > 1) {
         return {
@@ -269,6 +303,7 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "changed", path: args[0] ?? null });
+      if (inBatch) batchMemberCount++;
     } else if (op === "diff") {
       let staged = false;
       let path: string | null = null;
@@ -285,6 +320,7 @@ export function parseRequestText(text: string): ParsedRequest {
         }
       }
       ops.push({ kind: "diff", staged, path });
+      if (inBatch) batchMemberCount++;
     } else if (op === "log") {
       let limit: number | null = null;
       let path: string | null = null;
@@ -310,6 +346,7 @@ export function parseRequestText(text: string): ParsedRequest {
         }
       }
       ops.push({ kind: "log", limit, path });
+      if (inBatch) batchMemberCount++;
     } else if (op === "show") {
       if (args.length !== 2) {
         return {
@@ -336,6 +373,7 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       ops.push({ kind: "show", rev, path });
+      if (inBatch) batchMemberCount++;
     } else {
       return {
         ok: false,
@@ -347,8 +385,14 @@ export function parseRequestText(text: string): ParsedRequest {
   if (!sawRequest) {
     return { ok: false, reason: `no ${REQUEST_MARKER} request found in the clipboard content` };
   }
+  if (sawBatch && batchMemberCount === 0) {
+    return {
+      ok: false,
+      reason: `empty ${REQUEST_MARKER} batch — add at least one operation after \`${REQUEST_MARKER} batch\``,
+    };
+  }
   if (ops.length === 0) {
     return { ok: false, reason: "request contained no supported operations" };
   }
-  return { ok: true, ops };
+  return { ok: true, ops, batch: sawBatch };
 }

@@ -9,7 +9,7 @@
  */
 
 import { CONFIG_FILE_NAME, PRODUCT_NAME } from "../branding.js";
-import { parseProjectConfig } from "../config.js";
+import { clampBatchBytes, parseProjectConfig } from "../config.js";
 import { containsSensitiveContent } from "../sensitive.js";
 import { PathGuard } from "./boundary.js";
 import { EXIT_FAILURE, EXIT_OK, finishDiscoveryOp, requireGitRoot } from "./common.js";
@@ -104,7 +104,11 @@ export class SearchUseCase {
       excluded,
       limited,
     };
-    return { part: buildSearchPart(result, maxResults), produced: matches.length > 0 };
+    return {
+      part: buildSearchPart(result, maxResults),
+      produced: matches.length > 0,
+      maxBatchBytes: clampBatchBytes(config.maxBatchBytes),
+    };
   }
 }
 

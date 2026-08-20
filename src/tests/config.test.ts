@@ -5,7 +5,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { DEFAULT_CONFIG, parseProjectConfig } from "../config.js";
+import {
+  clampBatchBytes,
+  clampFileBytes,
+  DEFAULT_CONFIG,
+  MAX_BATCH_BYTES,
+  MAX_FILE_BYTES,
+  parseProjectConfig,
+} from "../config.js";
 
 describe("parseProjectConfig", () => {
   it("returns defaults for missing config", () => {
@@ -64,5 +71,32 @@ describe("parseProjectConfig", () => {
     );
     assert.deepEqual(config.allowedRoots, []);
     assert.deepEqual(config.sensitivePaths, ["a", "b"]);
+  });
+
+  it("parses the budget limits max_file_bytes and max_batch_bytes", () => {
+    const config = parseProjectConfig(
+      ["max_file_bytes = 4096", "max_batch_bytes = 65536"].join("\n"),
+    );
+    assert.equal(config.maxFileBytes, 4096);
+    assert.equal(config.maxBatchBytes, 65536);
+  });
+
+  it("keeps the default budgets for missing or malformed values", () => {
+    assert.equal(parseProjectConfig(null).maxFileBytes, DEFAULT_CONFIG.maxFileBytes);
+    assert.equal(parseProjectConfig(null).maxBatchBytes, DEFAULT_CONFIG.maxBatchBytes);
+    const malformed = parseProjectConfig(
+      ["max_file_bytes = many", "max_batch_bytes = 0", "max_batch_bytes = big"].join("\n"),
+    );
+    assert.equal(malformed.maxFileBytes, DEFAULT_CONFIG.maxFileBytes);
+    assert.equal(malformed.maxBatchBytes, DEFAULT_CONFIG.maxBatchBytes);
+  });
+
+  it("clamps budgets to the hard caps", () => {
+    assert.equal(clampFileBytes(0), 1);
+    assert.equal(clampFileBytes(Number.MAX_SAFE_INTEGER), MAX_FILE_BYTES);
+    assert.equal(clampFileBytes(3.9), 3);
+    assert.equal(clampBatchBytes(0), 1);
+    assert.equal(clampBatchBytes(Number.MAX_SAFE_INTEGER), MAX_BATCH_BYTES);
+    assert.equal(clampBatchBytes(10.9), 10);
   });
 });

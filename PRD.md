@@ -104,7 +104,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #3 Safe clipboard file context.
   >
 
-- [ ] #6 — Batch, budgets and recovery (labels: ready-for-agent)
+- [x] #6 — Batch, budgets and recovery (labels: ready-for-agent)
 
   **Issue #6 — détail complet**
   > ## Parent

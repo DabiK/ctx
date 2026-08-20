@@ -7,6 +7,7 @@
  */
 
 import { CONFIG_FILE_NAME, IGNORE_FILE_NAME, PRODUCT_NAME } from "./branding.js";
+import { MAX_BATCH_BYTES, MAX_FILE_BYTES } from "./config.js";
 
 /** Content of the generated project configuration file (`.ctx.toml`). */
 export function buildConfigTemplate(): string {
@@ -29,6 +30,10 @@ export function buildConfigTemplate(): string {
     `# tree_depth = 3        # depth of \`tree\` (1-10)`,
     `# inspect_depth = 2     # depth of the tree inside \`inspect\` (1-10)`,
     `# max_results = 100     # per-operation result cap for tree/glob/inspect/search (1-1000)`,
+    ``,
+    `# Budget limits (bounds on copied context, all optional):`,
+    `# max_file_bytes = 262144    # per-file cap; larger reads are omitted and explained (1-${MAX_FILE_BYTES})`,
+    `# max_batch_bytes = 1048576  # total copied response cap; oversized responses fail closed (1-${MAX_BATCH_BYTES})`,
   ].join("\n") + "\n";
 }
 

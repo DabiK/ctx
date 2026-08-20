@@ -9,7 +9,11 @@
  */
 
 import { CONFIG_FILE_NAME, PRODUCT_NAME, RESPONSE_MARKER } from "../branding.js";
-import { parseProjectConfig } from "../config.js";
+import {
+  clampBatchBytes,
+  clampFileBytes,
+  parseProjectConfig,
+} from "../config.js";
 import { parsePathSpec } from "../protocol.js";
 import { containsSensitiveContent } from "../sensitive.js";
 import { PathGuard } from "./boundary.js";
@@ -23,6 +27,7 @@ import {
 import type { ClipboardPort, FsPort, GitPort, TerminalPort } from "./ports.js";
 import {
   buildReadResponse,
+  buildRecoveryResponse,
   renderLines,
   type OmittedItem,
   type ReadItem,
@@ -56,17 +61,35 @@ export class ReadUseCase {
 
   /**
    * Shared execution for direct and protocol-driven reads. Exits non-zero
-   * when nothing could be read (all items refused or missing).
+   * when nothing could be read (all items refused or missing) or when the
+   * copied response would exceed the configured total budget.
    */
   async readSpecs(specs: string[], opts: ReadOptions): Promise<number> {
     const collected = await this.collectSpecs(specs, opts.allowSensitive);
     if (collected === null) {
       return EXIT_FAILURE;
     }
-    const { items } = collected;
+    const { items, maxBatchBytes } = collected;
 
     if (opts.copy) {
-      await copyOrThrow(buildReadResponse(items), this.clipboard, this.terminal);
+      const response = buildReadResponse(items);
+      const totalBytes = utf8ByteLength(response);
+      if (totalBytes > maxBatchBytes) {
+        const recovery = buildRecoveryResponse(
+          items
+            .filter((i): i is ReadItem => i.kind === "read")
+            .map((i) => ({ title: i.relPath, bytes: i.byteCount })),
+          totalBytes,
+          maxBatchBytes,
+        );
+        await copyOrThrow(recovery, this.clipboard, this.terminal);
+        this.terminal.error(
+          `${PRODUCT_NAME}: response over the total budget (${totalBytes} bytes > ${maxBatchBytes}) — ` +
+            `${RESPONSE_MARKER} recovery response copied to the clipboard.`,
+        );
+        return EXIT_FAILURE;
+      }
+      await copyOrThrow(response, this.clipboard, this.terminal);
     }
 
     this.printTerminal(items, opts);
@@ -83,7 +106,7 @@ export class ReadUseCase {
   async collectSpecs(
     specs: string[],
     allowSensitive: boolean,
-  ): Promise<{ items: ReadResultItem[] } | null> {
+  ): Promise<{ items: ReadResultItem[]; maxBatchBytes: number } | null> {
     const root = await requireGitRoot(this.git, this.fs, this.terminal);
     if (root === null) {
       return null;
@@ -91,12 +114,13 @@ export class ReadUseCase {
 
     const config = parseProjectConfig(this.fs.readText(this.fs.join(root, CONFIG_FILE_NAME)));
     const guard = new PathGuard(root, config, allowSensitive, this.fs);
+    const maxFileBytes = clampFileBytes(config.maxFileBytes);
 
     const items: ReadResultItem[] = [];
     for (const spec of specs) {
-      items.push(this.readOne(spec, guard, allowSensitive, config.lineNumbers));
+      items.push(this.readOne(spec, guard, allowSensitive, config.lineNumbers, maxFileBytes));
     }
-    return { items };
+    return { items, maxBatchBytes: clampBatchBytes(config.maxBatchBytes) };
   }
 
   /** Read one spec through the guard, producing a read or omitted item. */
@@ -105,6 +129,7 @@ export class ReadUseCase {
     guard: PathGuard,
     allowSensitive: boolean,
     lineNumbers: boolean,
+    maxFileBytes: number,
   ): ReadResultItem {
     const parsed = parsePathSpec(spec);
     if (!parsed.ok) {
@@ -141,6 +166,20 @@ export class ReadUseCase {
     const clamped = end !== requested.end;
     const lines = fileLines.slice(requested.start - 1, end);
     const text = renderLines(lines, requested.start, lineNumbers);
+    const byteCount = utf8ByteLength(text);
+
+    // Per-file budget: the selected content is omitted (never silently
+    // truncated) when it would exceed the configured cap, before any output
+    // is copied. The omitted item explains the omission and the remedy.
+    if (byteCount > maxFileBytes) {
+      return {
+        kind: "omitted",
+        relPath: parsed.path,
+        reason:
+          `content exceeds the per-file budget (max ${maxFileBytes} bytes) — ` +
+          `request a smaller range or raise max_file_bytes`,
+      };
+    }
 
     return {
       kind: "read",
@@ -149,7 +188,7 @@ export class ReadUseCase {
       start: requested.start,
       end,
       totalLines: total,
-      byteCount: utf8ByteLength(text),
+      byteCount,
       lineNumbers,
       clamped,
     };

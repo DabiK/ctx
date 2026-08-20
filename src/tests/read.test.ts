@@ -161,4 +161,52 @@ describe("ReadUseCase.file", () => {
     assert.equal(allowed, 0);
     assert.ok((clipboard.lastCopied() ?? "").includes("AKIA"));
   });
+
+  it("omits a file whose selected content exceeds the per-file budget (no silent truncation)", async () => {
+    const { ports, clipboard, fs } = fakePorts();
+    seedRepo(fs);
+    fs.seed(`${ROOT}/.ctx.toml`, "max_file_bytes = 9\n");
+
+    const code = await new ReadUseCase(ports.clipboard, ports.terminal, ports.git, ports.fs).file(
+      "src/app.ts",
+      { copy: true, allowSensitive: false, protocol: false },
+    );
+
+    assert.equal(code, 1);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("exceeds the per-file budget (max 9 bytes)"));
+    assert.ok(!copied.includes("1 | alpha"), "no partial content is copied");
+
+    // A smaller requested range stays within the budget and is read fully.
+    const small = await new ReadUseCase(
+      ports.clipboard,
+      ports.terminal,
+      ports.git,
+      ports.fs,
+    ).file("src/app.ts:1-1", {
+      copy: true,
+      allowSensitive: false,
+      protocol: false,
+    });
+    assert.equal(small, 0);
+    assert.ok((clipboard.lastCopied() ?? "").includes("1 | alpha"));
+  });
+
+  it("fails closed when a copied files response exceeds the total budget", async () => {
+    const { ports, clipboard, fs } = fakePorts();
+    seedRepo(fs);
+    fs.seed(`${ROOT}/.ctx.toml`, "max_batch_bytes = 40\n");
+
+    const code = await new ReadUseCase(ports.clipboard, ports.terminal, ports.git, ports.fs).files(
+      ["src/app.ts", "src/other.ts"],
+      { copy: true, allowSensitive: false, protocol: false },
+    );
+
+    assert.equal(code, 1);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Response too large — reduce scope"));
+    assert.ok(copied.includes("max_batch_bytes = 40 bytes"));
+    assert.ok(copied.includes("src/app.ts"), "the recovery names the costly file");
+    assert.ok(!copied.includes("alpha"), "oversized content is never copied");
+  });
 });

@@ -65,15 +65,15 @@ describe("RequestUseCase.read", () => {
 
   it("copies a structured refusal for malformed requests", async () => {
     const { ports, clipboard } = fakePorts();
-    clipboard.content = "@ctx batch read a.ts";
+    clipboard.content = "@ctx explode a.ts";
 
     const code = await makeRequest(ports).read({ allowSensitive: false });
 
     assert.equal(code, 1);
     const copied = clipboard.lastCopied() ?? "";
     assert.ok(copied.includes("## Request refused"));
-    assert.ok(copied.includes("unsupported operation `batch`"));
-    assert.ok(copied.includes("file <path>"));
+    assert.ok(copied.includes("unsupported operation `explode`"));
+    assert.ok(copied.includes("batch (a block of @ctx operations)"));
   });
 
   it("reports when the clipboard contains no @ctx request", async () => {
@@ -188,5 +188,86 @@ describe("RequestUseCase.read", () => {
     const copied = clipboard.lastCopied() ?? "";
     assert.ok(copied.includes("## file missing.ts"));
     assert.ok(copied.includes("not found"));
+  });
+
+  it("executes a @ctx batch in declared order with one stable response", async () => {
+    const { ports, clipboard, fs, search } = fakePorts();
+    seedRepo(fs);
+    search.matches = [{ relPath: "src/other.ts", line: 1, content: "other" }];
+    clipboard.content = [
+      "@ctx batch",
+      "@ctx file src/app.ts:2-2",
+      "@ctx search other",
+      "@ctx status",
+    ].join("\n");
+
+    const code = await makeRequest(ports, search).read({ allowSensitive: false });
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.startsWith(RESPONSE_MARKER));
+    assert.ok(copied.includes("## Batch response"));
+    assert.ok(copied.includes("Operations: 3 | bytes:"));
+    assert.ok(copied.includes("tokens: ~"));
+    assert.ok(copied.includes("limits: total ≤ 1048576 bytes | per-file ≤ 262144 bytes"));
+    const fileIdx = copied.indexOf("## file src/app.ts:2-2");
+    const searchIdx = copied.indexOf('## Search "other" (fake)');
+    const statusIdx = copied.indexOf("## Status");
+    assert.ok(fileIdx >= 0 && searchIdx > fileIdx && statusIdx > searchIdx, "declared order");
+    assert.ok(copied.includes("2 | beta"));
+    assert.equal(copied.split(RESPONSE_MARKER).length - 1, 1, "one response marker");
+  });
+
+  it("gives a @ctx batch of file reads the batch envelope", async () => {
+    const { ports, clipboard, fs } = fakePorts();
+    seedRepo(fs);
+    clipboard.content = [
+      "@ctx batch",
+      "@ctx file src/app.ts:1-1",
+      "@ctx file src/other.ts",
+    ].join("\n");
+
+    const code = await makeRequest(ports).read({ allowSensitive: false });
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Batch response"));
+    assert.ok(copied.includes("## file src/app.ts:1-1"));
+    assert.ok(copied.includes("## file src/other.ts"));
+    assert.ok(copied.includes("Read: 1 | Omitted: 0"));
+  });
+
+  it("fails closed when a batch would exceed the total budget", async () => {
+    const { ports, clipboard, fs } = fakePorts();
+    seedRepo(fs);
+    fs.seed(`${ROOT}/.ctx.toml`, "max_batch_bytes = 40\n");
+    clipboard.content = ["@ctx batch", "@ctx file src/app.ts", "@ctx file src/other.ts"].join("\n");
+
+    const code = await makeRequest(ports).read({ allowSensitive: false });
+
+    assert.equal(code, 1);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Response too large — reduce scope"));
+    assert.ok(copied.includes("max_batch_bytes = 40 bytes"));
+    assert.ok(copied.includes("Most expensive requested sections:"));
+    assert.ok(copied.includes("src/app.ts"), "the recovery names the costly section");
+    assert.ok(!copied.includes("1 | alpha"), "oversized content is never copied");
+    assert.ok(!copied.includes("1 | other"), "oversized content is never copied");
+  });
+
+  it("omits oversized files inside a batch with an explanation", async () => {
+    const { ports, clipboard, fs } = fakePorts();
+    seedRepo(fs);
+    fs.seed(`${ROOT}/.ctx.toml`, "max_file_bytes = 8\n");
+    clipboard.content = ["@ctx batch", "@ctx file src/app.ts", "@ctx file src/other.ts"].join("\n");
+
+    const code = await makeRequest(ports).read({ allowSensitive: false });
+
+    assert.equal(code, 1, "nothing readable exits non-zero");
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Batch response"));
+    assert.ok(copied.includes("exceeds the per-file budget (max 8 bytes)"));
+    assert.ok(!copied.includes("1 | alpha"));
+    assert.ok(!copied.includes("1 | other"));
   });
 });

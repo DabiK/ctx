@@ -2,22 +2,28 @@
  * `ctx read` application use case — the clipboard round trip.
  *
  * Reads the current clipboard content, parses the `@ctx` request it contains
- * (this build: `file`, `files`, `tree`, `glob`, `inspect`, `search`,
+ * (this build: `batch`, `file`, `files`, `tree`, `glob`, `inspect`, `search`,
  * `status`, `changed`, `diff`, `log`, and `show`), executes the operations,
- * and copies one stable protocol response back. Requests containing only
- * read ops keep the legacy single read response; any other request produces
- * a combined response with one section per operation. Malformed or
- * unsupported requests produce a structured refusal response instead of
- * touching the filesystem or running any Git command.
+ * and copies one stable protocol response back. `@ctx batch` requests emit a
+ * batch envelope with total byte/token metadata and the configured limits.
+ * Requests containing only plain read ops keep the legacy single read
+ * response; any other request produces a combined response with one section
+ * per operation. Malformed or unsupported requests produce a structured
+ * refusal response instead of touching the filesystem or running any Git
+ * command. Responses that would exceed the configured total budget fail
+ * closed: a recovery response identifying the most expensive sections is
+ * copied instead of the oversized content.
  */
 
-import { PRODUCT_NAME } from "../branding.js";
+import { CONFIG_FILE_NAME, PRODUCT_NAME } from "../branding.js";
+import { clampBatchBytes, clampFileBytes, parseProjectConfig } from "../config.js";
 import { parseRequestText, SUPPORTED_OPS, type RequestOp } from "../protocol.js";
 import {
   EXIT_FAILURE,
   EXIT_OK,
   copyOrThrow,
   requireGitRoot,
+  utf8ByteLength,
 } from "./common.js";
 import { DiscoveryUseCase, type OpExecution } from "./discovery.js";
 import { GitUseCase } from "./git.js";
@@ -30,8 +36,10 @@ import type {
 } from "./ports.js";
 import { ReadUseCase } from "./read.js";
 import {
+  buildBatchResponse,
   buildCombinedResponse,
   buildReadPart,
+  buildRecoveryResponse,
   buildRefusalResponse,
   type ResponsePart,
 } from "./response.js";
@@ -39,6 +47,16 @@ import { SearchUseCase } from "./search.js";
 
 export interface RequestOptions {
   allowSensitive: boolean;
+}
+
+/** Budget and envelope context of the request, resolved once from the config. */
+interface RequestBudget {
+  /** Clamped total-response budget (max_batch_bytes). */
+  maxBatchBytes: number;
+  /** Clamped per-file budget (max_file_bytes), shown in the batch envelope. */
+  perFileBytes: number;
+  /** True when the request used the `@ctx batch` container. */
+  usedBatch: boolean;
 }
 
 export class RequestUseCase {
@@ -85,9 +103,16 @@ export class RequestUseCase {
       return EXIT_FAILURE;
     }
 
-    // Read-only requests keep the legacy single read response (byte-identical
-    // to `ctx files --copy`).
-    if (parsed.ops.every((op) => op.kind === "file" || op.kind === "files")) {
+    const config = parseProjectConfig(this.fs.readText(this.fs.join(root, CONFIG_FILE_NAME)));
+    const budget: RequestBudget = {
+      maxBatchBytes: clampBatchBytes(config.maxBatchBytes),
+      perFileBytes: clampFileBytes(config.maxFileBytes),
+      usedBatch: parsed.batch,
+    };
+
+    // Plain read-only requests (no batch container) keep the legacy single
+    // read response (byte-identical to `ctx files --copy`).
+    if (!parsed.batch && parsed.ops.every((op) => op.kind === "file" || op.kind === "files")) {
       const specs = parsed.ops.flatMap((op) => op.specs);
       return this.reader.files(specs, {
         copy: true,
@@ -96,11 +121,15 @@ export class RequestUseCase {
       });
     }
 
-    return this.executeCombined(parsed.ops, opts);
+    return this.executeCombined(parsed.ops, opts, budget);
   }
 
-  /** Execute a mixed request into one combined response copied to the clipboard. */
-  private async executeCombined(ops: RequestOp[], opts: RequestOptions): Promise<number> {
+  /** Execute a mixed or batch request into one response copied to the clipboard. */
+  private async executeCombined(
+    ops: RequestOp[],
+    opts: RequestOptions,
+    budget: RequestBudget,
+  ): Promise<number> {
     const parts: ResponsePart[] = [];
     const failures: string[] = [];
     let produced = false;
@@ -117,6 +146,7 @@ export class RequestUseCase {
             exec = {
               part: buildReadPart(items, op.kind === "file" ? `file ${op.specs[0] ?? ""}` : `files ${op.specs.join(" ")}`),
               produced: readCount > 0,
+              maxBatchBytes: collected.maxBatchBytes,
             };
           }
           break;
@@ -162,7 +192,27 @@ export class RequestUseCase {
       }
     }
 
-    await copyOrThrow(buildCombinedResponse(parts), this.clipboard, this.terminal);
+    // Total-output budget: the copied response must fit; when it would not,
+    // a recovery response identifying the costliest sections is copied
+    // instead (fail closed, never silently truncated).
+    const response = budget.usedBatch
+      ? buildBatchResponse(parts, budget.maxBatchBytes, budget.perFileBytes)
+      : buildCombinedResponse(parts);
+    const totalBytes = utf8ByteLength(response);
+    if (totalBytes > budget.maxBatchBytes) {
+      const recovery = buildRecoveryResponse(
+        parts.map((p) => ({ title: p.title, bytes: p.bytes })),
+        totalBytes,
+        budget.maxBatchBytes,
+      );
+      await copyOrThrow(recovery, this.clipboard, this.terminal);
+      this.terminal.error(
+        `${PRODUCT_NAME}: response over the total budget (${totalBytes} bytes > ${budget.maxBatchBytes}) — ` +
+          `recovery response copied to the clipboard.`,
+      );
+      return EXIT_FAILURE;
+    }
+    await copyOrThrow(response, this.clipboard, this.terminal);
 
     for (const title of failures) {
       this.terminal.error(

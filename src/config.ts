@@ -13,6 +13,10 @@
 export const MAX_DEPTH = 10;
 /** Hard cap on per-operation result counts so a misconfigured project stays bounded. */
 export const MAX_RESULTS = 1000;
+/** Hard cap on the per-file read budget so a misconfigured project stays bounded. */
+export const MAX_FILE_BYTES = 16 * 1024 * 1024;
+/** Hard cap on the total-response budget so a misconfigured project stays bounded. */
+export const MAX_BATCH_BYTES = 128 * 1024 * 1024;
 
 export interface ProjectConfig {
   /** Absolute directories ctx may read in addition to the repository root. */
@@ -27,6 +31,18 @@ export interface ProjectConfig {
   inspectDepth: number;
   /** Default per-operation result limit (clamped to [1, MAX_RESULTS]). */
   maxResults: number;
+  /**
+   * Per-file content budget in bytes: a read whose selected content exceeds
+   * this is omitted (never silently truncated) before the context is copied.
+   * Clamped to [1, MAX_FILE_BYTES].
+   */
+  maxFileBytes: number;
+  /**
+   * Total-response budget in bytes: a request whose copied response exceeds
+   * this fails closed and copies a recovery response instead. Clamped to
+   * [1, MAX_BATCH_BYTES].
+   */
+  maxBatchBytes: number;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
@@ -36,6 +52,8 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   treeDepth: 3,
   inspectDepth: 2,
   maxResults: 100,
+  maxFileBytes: 256 * 1024,
+  maxBatchBytes: 1024 * 1024,
 };
 
 /** Parse `.ctx.toml` text; `null` (missing file) yields the defaults. */
@@ -47,6 +65,8 @@ export function parseProjectConfig(text: string | null): ProjectConfig {
     treeDepth: DEFAULT_CONFIG.treeDepth,
     inspectDepth: DEFAULT_CONFIG.inspectDepth,
     maxResults: DEFAULT_CONFIG.maxResults,
+    maxFileBytes: DEFAULT_CONFIG.maxFileBytes,
+    maxBatchBytes: DEFAULT_CONFIG.maxBatchBytes,
   };
   if (text === null) {
     return config;
@@ -91,6 +111,16 @@ export function parseProjectConfig(text: string | null): ProjectConfig {
       const parsed = parsePositiveInt(value);
       if (parsed !== null) {
         config.maxResults = parsed;
+      }
+    } else if (key === "max_file_bytes") {
+      const parsed = parsePositiveInt(value);
+      if (parsed !== null) {
+        config.maxFileBytes = parsed;
+      }
+    } else if (key === "max_batch_bytes") {
+      const parsed = parsePositiveInt(value);
+      if (parsed !== null) {
+        config.maxBatchBytes = parsed;
       }
     }
   }
@@ -140,4 +170,14 @@ function parsePositiveInt(value: string): number | null {
   }
   const n = Number(value);
   return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/** Clamp a per-file budget to [1, MAX_FILE_BYTES] so a misconfigured project stays bounded. */
+export function clampFileBytes(n: number): number {
+  return Math.min(Math.max(1, Math.floor(n)), MAX_FILE_BYTES);
+}
+
+/** Clamp a total-response budget to [1, MAX_BATCH_BYTES] so a misconfigured project stays bounded. */
+export function clampBatchBytes(n: number): number {
+  return Math.min(Math.max(1, Math.floor(n)), MAX_BATCH_BYTES);
 }

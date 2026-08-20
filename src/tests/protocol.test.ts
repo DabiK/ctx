@@ -102,15 +102,92 @@ describe("parseRequestText", () => {
   });
 
   it("refuses unsupported operations with a structured reason", () => {
+    const r = parseRequestText("@ctx nope");
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("unsupported operation `nope`"));
+    }
+    const b = parseRequestText("@ctx patch");
+    assert.ok(!b.ok);
+    if (!b.ok) {
+      assert.ok(b.reason.includes("unsupported operation `patch`"));
+    }
+  });
+
+  it("parses a @ctx batch container and flattens its members in order", () => {
+    const r = parseRequestText(
+      [
+        "@ctx batch",
+        "@ctx file src/app.ts:1-20",
+        "@ctx search \"foo bar\"",
+        "@ctx status",
+      ].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.batch, true);
+      assert.deepEqual(r.ops, [
+        { kind: "file", specs: ["src/app.ts:1-20"] },
+        { kind: "search", query: "foo bar" },
+        { kind: "status" },
+      ]);
+    }
+  });
+
+  it("keeps operations before the batch outside it but still orders them", () => {
+    const r = parseRequestText(
+      ["@ctx file a.ts", "@ctx batch", "@ctx tree --depth 2", "chat text", "@ctx changed"].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.batch, true);
+      assert.deepEqual(r.ops, [
+        { kind: "file", specs: ["a.ts"] },
+        { kind: "tree", depth: 2 },
+        { kind: "changed", path: null },
+      ]);
+    }
+  });
+
+  it("refuses a batch with arguments", () => {
     const r = parseRequestText("@ctx batch read a.ts");
     assert.ok(!r.ok);
     if (!r.ok) {
-      assert.ok(r.reason.includes("unsupported operation `batch`"));
+      assert.ok(r.reason.includes("batch` accepts no arguments"));
     }
-    const b = parseRequestText("@ctx nope");
-    assert.ok(!b.ok);
-    if (!b.ok) {
-      assert.ok(b.reason.includes("unsupported operation `nope`"));
+  });
+
+  it("refuses malformed batch nesting", () => {
+    const r = parseRequestText(["@ctx batch", "@ctx batch", "@ctx file a.ts"].join("\n"));
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("malformed nesting"));
+    }
+  });
+
+  it("refuses an empty batch", () => {
+    const r = parseRequestText("@ctx batch");
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("empty @ctx batch"));
+    }
+    const onlyOutside = parseRequestText(["@ctx file a.ts", "@ctx batch"].join("\n"));
+    assert.ok(!onlyOutside.ok);
+    if (!onlyOutside.ok) {
+      assert.ok(onlyOutside.reason.includes("empty @ctx batch"));
+    }
+  });
+
+  it("marks plain requests as non-batch", () => {
+    const r = parseRequestText("@ctx status");
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.batch, false);
+    }
+    const mixed = parseRequestText(["@ctx file a.ts", "@ctx tree"].join("\n"));
+    assert.ok(mixed.ok);
+    if (mixed.ok) {
+      assert.equal(mixed.batch, false);
     }
   });
 

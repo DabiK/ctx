@@ -137,4 +137,45 @@ describe("integration: safe clipboard file context", () => {
     assert.ok(!copied.includes("bundled"));
     assert.ok(!copied.includes('"password"'));
   });
+
+  it("executes a @ctx batch against a real repository in declared order", async () => {
+    seed("src/a.ts", "one\ntwo\n");
+    seed("src/b.ts", "three\n");
+    clipboard.content = [
+      "@ctx batch",
+      "@ctx file src/a.ts:1-1",
+      "@ctx file src/b.ts",
+    ].join("\n");
+
+    const code = await new RequestUseCase(clipboard, terminal, git, fs, new FakeSearch()).read({
+      allowSensitive: false,
+    });
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Batch response"));
+    const aIdx = copied.indexOf("## file src/a.ts:1-1");
+    const bIdx = copied.indexOf("## file src/b.ts");
+    assert.ok(aIdx >= 0 && bIdx > aIdx, "declared order preserved");
+    assert.ok(copied.includes("1 | one"));
+    assert.ok(copied.includes("1 | three"));
+  });
+
+  it("fails closed with a recovery response when a batch exceeds the total budget", async () => {
+    seed("src/a.ts", "one\ntwo\nthree\n");
+    seed("src/b.ts", "four\nfive\n");
+    seed(".ctx.toml", "max_batch_bytes = 40\n");
+    clipboard.content = ["@ctx batch", "@ctx file src/a.ts", "@ctx file src/b.ts"].join("\n");
+
+    const code = await new RequestUseCase(clipboard, terminal, git, fs, new FakeSearch()).read({
+      allowSensitive: false,
+    });
+
+    assert.equal(code, 1);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Response too large — reduce scope"));
+    assert.ok(copied.includes("max_batch_bytes = 40 bytes"));
+    assert.ok(!copied.includes("one"));
+    assert.ok(!copied.includes("four"));
+  });
 });

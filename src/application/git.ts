@@ -16,7 +16,7 @@
  */
 
 import { CONFIG_FILE_NAME, PRODUCT_NAME } from "../branding.js";
-import { parseProjectConfig, type ProjectConfig } from "../config.js";
+import { clampBatchBytes, parseProjectConfig, type ProjectConfig } from "../config.js";
 import { isSafeRevision, isSafeShowPath } from "../protocol.js";
 import { PathGuard } from "./boundary.js";
 import { EXIT_FAILURE, finishDiscoveryOp, requireGitRoot, utf8ByteLength } from "./common.js";
@@ -126,7 +126,11 @@ export class GitUseCase {
       this.reportGitFailure(err);
       return null;
     }
-    return { part: buildStatusPart(status), produced: status.files.length > 0 };
+    return {
+      part: buildStatusPart(status),
+      produced: status.files.length > 0,
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
+    };
   }
 
   /** Collect the changed block without copying/printing (request use case). */
@@ -137,7 +141,11 @@ export class GitUseCase {
     }
     const scope = this.scopeOrRefusal(ctx, path, "Changed");
     if (scope.refusedPart !== null) {
-      return { part: scope.refusedPart, produced: false };
+      return {
+        part: scope.refusedPart,
+        produced: false,
+        maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
+      };
     }
     let status: GitStatus;
     try {
@@ -155,6 +163,7 @@ export class GitUseCase {
     return {
       part: buildChangedPart({ branch: status.branch, files }, path),
       produced: files.length > 0,
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
     };
   }
 
@@ -170,7 +179,11 @@ export class GitUseCase {
     }
     const scope = this.scopeOrRefusal(ctx, path, "Diff");
     if (scope.refusedPart !== null) {
-      return { part: scope.refusedPart, produced: false };
+      return {
+        part: scope.refusedPart,
+        produced: false,
+        maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
+      };
     }
     let diff: GitDiff;
     try {
@@ -182,6 +195,7 @@ export class GitUseCase {
     return {
       part: buildDiffPart(diff, path, staged),
       produced: diff.files > 0,
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
     };
   }
 
@@ -198,7 +212,11 @@ export class GitUseCase {
     const maxCommits = clampResults(limitOverride ?? ctx.config.maxResults);
     const scope = this.scopeOrRefusal(ctx, path, "Log");
     if (scope.refusedPart !== null) {
-      return { part: scope.refusedPart, produced: false };
+      return {
+        part: scope.refusedPart,
+        produced: false,
+        maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
+      };
     }
     let entries;
     try {
@@ -210,6 +228,7 @@ export class GitUseCase {
     return {
       part: buildLogPart(entries, path, maxCommits),
       produced: entries.length > 0,
+      maxBatchBytes: clampBatchBytes(ctx.config.maxBatchBytes),
     };
   }
 
@@ -219,10 +238,11 @@ export class GitUseCase {
     path: string,
     allowSensitive: boolean,
   ): Promise<OpExecution | null> {
-    const root = await requireGitRoot(this.git, this.fs, this.terminal);
-    if (root === null) {
+    const ctx = await this.openContext(allowSensitive);
+    if (ctx === null) {
       return null;
     }
+    const budget = clampBatchBytes(ctx.config.maxBatchBytes);
     // Defensive re-validation: the protocol parser and CLI already refuse
     // unsafe forms, but show must never forward an arbitrary fragment.
     if (!isSafeRevision(rev) || !isSafeShowPath(path)) {
@@ -232,16 +252,21 @@ export class GitUseCase {
       return {
         part: { title: `Show ${rev}:${path}`, lines, bytes: utf8ByteLength(lines.join("\n")) },
         produced: false,
+        maxBatchBytes: budget,
       };
     }
     let result: GitShowResult;
     try {
-      result = await this.git.show(root, rev, path);
+      result = await this.git.show(ctx.root, rev, path);
     } catch (err) {
       this.reportGitFailure(err);
       return null;
     }
-    return { part: buildShowPart(result, rev, path), produced: result.ok };
+    return {
+      part: buildShowPart(result, rev, path),
+      produced: result.ok,
+      maxBatchBytes: budget,
+    };
   }
 
   /** Resolve the repository root, project config, and permission boundary. */

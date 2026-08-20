@@ -131,3 +131,44 @@
   round trip, unsafe `@ctx show a..b` refusal copied to the clipboard, and
   non-repository failure with an actionable message.
 
+## 2026-08-20 — #6 Batch, budgets and recovery
+
+- Added `@ctx batch` as an explicit multi-operation container: one `@ctx batch`
+  line followed by one `@ctx` operation per line (in declared order). The parser
+  flattens the members into the existing ordered execution; a batch must contain
+  at least one operation, accepts no arguments, and refuses nested `@ctx batch`
+  (`malformed nesting`) and empty batches up front. `ParsedRequest` carries a
+  `batch` flag; batch requests always render the batch envelope, while plain
+  read-only multi-line requests keep the legacy byte-identical single read
+  response.
+- Budget limits from `.ctx.toml`: `max_file_bytes` (default 256 KiB, hard cap
+  16 MiB) and `max_batch_bytes` (default 1 MiB, hard cap 128 MiB), with
+  `clampFileBytes`/`clampBatchBytes`; the `.ctx.toml` template documents them.
+- Per-file budget: a read whose rendered selected content would exceed
+  `max_file_bytes` is omitted with an explicit explanation (`content exceeds the
+  per-file budget … request a smaller range or raise max_file_bytes`) — never
+  silently truncated — in direct reads, batch members, and combined requests.
+- Total-output budget: before any copied response, its byte size is measured;
+  when it would exceed `max_batch_bytes` the full content is not copied. Instead
+  a structured `## Response too large — reduce scope` recovery response is
+  copied, listing the most expensive requested sections by bytes and asking the
+  LLM to reduce scope. Applied to single-op `--copy` commands (via
+  `finishDiscoveryOp`, which now reads each operation's clamped budget from
+  `OpExecution.maxBatchBytes`), to `ctx files`/read-only requests (via
+  `readSpecs`), and to combined/batch requests (via `executeCombined`).
+- Batch responses carry a `## Batch response` summary with total bytes/tokens
+  and the configured limits (`Operations: N | bytes: B | tokens: ~T` and
+  `limits: total ≤ … | per-file ≤ …`); per-part byte/token metadata and
+  `limited: yes (max N)` notices were already in place.
+- Protocol prompt and `read` CLI help document the batch syntax and the
+  fail-closed budget behavior.
+- Tests: protocol parser (batch members/order, nesting/empty/arg refusals,
+  non-batch flag), config (budget keys, defaults, hard-cap clamping), read
+  (per-file omission + total-budget recovery incl. smaller-range success), request
+  (batch envelope/order, file-only batch, batch total-budget recovery, batch
+  per-file omission), CLI (batch round trip), and real-temporary-repository
+  integration (ordered batch and fail-closed recovery). 216 tests pass;
+  typecheck clean. Verified the packaged CLI manually on macOS: ordered batch
+  round trip, per-file omission with explanation, total-budget recovery
+  (combined and single-op `--copy`), and batch nesting/empty/argument refusals.
+

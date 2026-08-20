@@ -8,7 +8,11 @@
 import { PRODUCT_NAME, RESPONSE_MARKER } from "../branding.js";
 import { buildCompactPrompt, buildPrompt } from "../prompt.js";
 import type { ClipboardPort, FsPort, GitPort, TerminalPort } from "./ports.js";
-import { buildEnvelope, type ResponsePart } from "./response.js";
+import {
+  buildEnvelope,
+  buildRecoveryResponse,
+  type ResponsePart,
+} from "./response.js";
 
 export const EXIT_OK = 0;
 export const EXIT_FAILURE = 1;
@@ -129,21 +133,35 @@ export function report(
 }
 
 /**
- * Shared tail of the discovery operations: copy the stable response on demand,
- * print the block (or a protocol summary line), and compute the exit code.
+ * Shared tail of the discovery operations: apply the total-output budget
+ * (fail closed with a recovery response when the copied block would exceed
+ * it), copy the stable response on demand, print the block (or a protocol
+ * summary line), and compute the exit code.
  */
 export async function finishDiscoveryOp(
-  exec: { part: ResponsePart; produced: boolean },
+  exec: { part: ResponsePart; produced: boolean; maxBatchBytes?: number },
   opts: { copy: boolean; protocol: boolean },
   clipboard: ClipboardPort,
   terminal: TerminalPort,
 ): Promise<number> {
   if (opts.copy) {
-    await copyOrThrow(
-      buildEnvelope([`## ${exec.part.title}`, ...exec.part.lines]),
-      clipboard,
-      terminal,
-    );
+    const response = buildEnvelope([`## ${exec.part.title}`, ...exec.part.lines]);
+    const totalBytes = utf8ByteLength(response);
+    const maxBytes = exec.maxBatchBytes ?? Number.MAX_SAFE_INTEGER;
+    if (totalBytes > maxBytes) {
+      const recovery = buildRecoveryResponse(
+        [{ title: exec.part.title, bytes: exec.part.bytes }],
+        totalBytes,
+        maxBytes,
+      );
+      await copyOrThrow(recovery, clipboard, terminal);
+      terminal.error(
+        `${PRODUCT_NAME}: response over the total budget (${totalBytes} bytes > ${maxBytes}) — ` +
+          `${RESPONSE_MARKER} recovery response copied to the clipboard.`,
+      );
+      return EXIT_FAILURE;
+    }
+    await copyOrThrow(response, clipboard, terminal);
   }
   if (opts.protocol) {
     terminal.info(

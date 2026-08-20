@@ -320,6 +320,25 @@ describe("runCli", () => {
     assert.ok(copied.includes("## Search \"alpha\" (fake)"));
   });
 
+  it("runs a @ctx batch request through the CLI read command", async () => {
+    const { ports, clipboard, fs, search } = fakePorts();
+    fs.seed("/repo/src/app.ts", "alpha\n");
+    search.matches = [{ relPath: "src/app.ts", line: 1, content: "alpha" }];
+    clipboard.content = [
+      "@ctx batch",
+      "@ctx file src/app.ts:1-1",
+      "@ctx search alpha",
+    ].join("\n");
+
+    const code = await runCli(["read"], ports);
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Batch response"));
+    assert.ok(copied.includes("## file src/app.ts:1-1"));
+    assert.ok(copied.includes("## Search \"alpha\" (fake)"));
+  });
+
   it("runs status and changed through the CLI with fake Git data", async () => {
     const { ports, terminal, clipboard, git, fs } = fakePorts();
     git.statusFiles = [

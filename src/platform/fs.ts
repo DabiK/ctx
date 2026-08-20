@@ -4,7 +4,7 @@
  * symlink resolution semantics live here, not in application code.
  */
 
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { FsPort } from "../application/ports.js";
 
@@ -28,6 +28,15 @@ export class SystemFs implements FsPort {
 
   writeText(path: string, content: string): void {
     writeFileSync(path, content, "utf8");
+  }
+
+  mkdirs(path: string): boolean {
+    try {
+      mkdirSync(path, { recursive: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   join(...parts: string[]): string {

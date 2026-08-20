@@ -64,11 +64,16 @@ export type GitShowResult =
   | { ok: true; content: string }
   | { ok: false; error: string };
 
+/** Result of a `git apply` preflight or application. */
+export type GitPatchResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 /**
  * Git operations. ctx requires a Git repository; repository root discovery is
  * a core boundary and Git features are never silently simulated. The port
  * surface is the fixed allowlist of Git behavior: every method maps to one
- * well-defined read-only `git` invocation (or its Windows-native equivalent);
+ * well-defined `git` invocation (or its Windows-native equivalent);
  * nothing here is arbitrary Git or shell execution.
  */
 export interface GitPort {
@@ -91,6 +96,18 @@ export interface GitPort {
    * (with the Git diagnostic) when the revision or path does not exist there.
    */
   show(root: string, rev: string, path: string): Promise<GitShowResult>;
+  /**
+   * `git apply --check` — verify `patch` applies cleanly to the working tree
+   * of `root` without changing anything. The application layer preflights
+   * every tagged patch before any file change.
+   */
+  checkPatch(root: string, patch: string): Promise<GitPatchResult>;
+  /**
+   * `git apply` — apply `patch` to the working tree of `root`. Git is the
+   * recovery path (`git apply -R` reverses the change). A non-zero exit
+   * carries the Git diagnostic.
+   */
+  applyPatch(root: string, patch: string): Promise<GitPatchResult>;
 }
 
 /** Narrow filesystem surface used by the application use cases. */
@@ -103,6 +120,11 @@ export interface FsPort {
   readText(path: string): string | null;
   /** Write `content` to `path` (creates or replaces). */
   writeText(path: string, content: string): void;
+  /**
+   * Create `path` and any missing parent directories. Returns `true` when the
+   * directory exists afterwards; `false` when it could not be created.
+   */
+  mkdirs(path: string): boolean;
   /**
    * Join path segments with the platform separator. Platform path semantics
    * belong to the filesystem adapter, not to application code.

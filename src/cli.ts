@@ -19,6 +19,7 @@ import { PromptUseCase } from "./application/prompt.js";
 import { ReadUseCase } from "./application/read.js";
 import { RequestUseCase } from "./application/request.js";
 import { SearchUseCase } from "./application/search.js";
+import { WriteUseCase } from "./application/write.js";
 import { isSafeRevision, isSafeShowPath } from "./protocol.js";
 import { SystemClipboard } from "./platform/clipboard.js";
 import { SystemEnv } from "./platform/env.js";
@@ -46,7 +47,8 @@ type Command =
   | "changed"
   | "diff"
   | "log"
-  | "show";
+  | "show"
+  | "apply";
 
 interface ParsedArgs {
   command: Command | null;
@@ -85,6 +87,7 @@ function usage(): string {
     `  log       Print recent commits (optionally scoped to a path).`,
     `  show      Print one file's content at a revision (git show rev:path).`,
     `  read      Execute the @ctx request in the clipboard and copy the response back.`,
+    `  apply     Apply the tagged patch/write/sequence proposal in the clipboard.`,
     `  help      Show this help.`,
     ``,
     `Options:`,
@@ -169,6 +172,11 @@ function commandHelp(command: Command): string {
         `glob, inspect, search, status, changed, diff, log, show, and batch. Malformed,`,
         `denied, or oversized requests produce a structured recovery response instead`,
         `of silently truncated content.`,
+        ``,
+        `A tagged write proposal (@ctx patch + a unified multi-file diff, @ctx write`,
+        `<path> + a full-file body, or @ctx sequence) is validated and preflighted`,
+        `here without changing anything — the preview is copied and the actual write`,
+        `requires the explicit ${EXECUTABLE_NAME} apply command.`,
         ``,
         `Options:`,
         `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
@@ -283,6 +291,22 @@ function commandHelp(command: Command): string {
         `  --copy              Copy the # CTX RESPONSE block to the clipboard.`,
         `  --allow-sensitive   Disclose sensitive paths/content for this run.`,
       ].join("\n");
+    case "apply":
+      return [
+        `Usage: ${EXECUTABLE_NAME} apply [--allow-sensitive]`,
+        ``,
+        `Apply the tagged write proposal found in the clipboard: @ctx patch (one`,
+        `multi-file unified diff), @ctx write <path> (a full-file body), or @ctx`,
+        `sequence (the write followed by verification reads that run only after`,
+        `it succeeds). Paths are re-validated against the repository boundary`,
+        `(repository-relative, inside the repo root, .ctxignore and sensitive`,
+        `rules) and patches are preflighted with git apply --check before any`,
+        `change. Refused proposals change no files and copy a structured`,
+        `diagnostic instead. Git is the recovery path (git apply -R reverses).`,
+        ``,
+        `Options:`,
+        `  --allow-sensitive   Permit writing sensitive paths/content for this run.`,
+      ].join("\n");
   }
 }
 
@@ -370,6 +394,7 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
     command !== "diff" &&
     command !== "log" &&
     command !== "show" &&
+    command !== "apply" &&
     command !== "help"
   ) {
     return { error: `Unknown command: ${command}` };
@@ -436,6 +461,7 @@ export function parseArgs(argv: string[]): { parsed: ParsedArgs } | { error: str
       command === "prompt" ||
       command === "doctor" ||
       command === "read" ||
+      command === "apply" ||
       command === "tree" ||
       command === "status") &&
     parsed.args.length > 0
@@ -565,6 +591,12 @@ export async function runCli(argv: string[], ports: PlatformPorts): Promise<numb
     }
     case "read":
       return runRead(ports, parsed);
+    case "apply": {
+      const { clipboard, terminal, git, fs, search } = ports;
+      return new WriteUseCase(clipboard, terminal, git, fs, search).apply({
+        allowSensitive: parsed.allowSensitive,
+      });
+    }
   }
 }
 

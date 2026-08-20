@@ -468,3 +468,134 @@ export function buildRefusalResponse(reason: string, supported: string): string 
     `This build supports: ${supported}`,
   ].join("\n") + "\n";
 }
+
+/** One write target with its validation outcome (used by write responses). */
+export interface WriteTargetReport {
+  /** Repository-relative target path. */
+  relPath: string;
+  /** Change kind: "modified", "new file", "deleted", "renamed", or "full write". */
+  kind: string;
+  /** Refusal reason when the target is not acceptable, else `null`. */
+  refusedReason: string | null;
+  /** Byte size of the new content (full writes only), else `null`. */
+  bytes: number | null;
+}
+
+/** Render the per-target list of a write response. */
+function writeTargetLines(targets: WriteTargetReport[]): string[] {
+  return targets.map((t) =>
+    t.refusedReason !== null
+      ? `- ${t.relPath} — ${t.refusedReason}`
+      : `- ${t.relPath} (${t.kind}${t.bytes !== null ? `, ${t.bytes} bytes` : ""})`,
+  );
+}
+
+/**
+ * Refusal/failure response for a write proposal: lists every refused target
+ * and the caller-provided issue lines (content checks, preflight or
+ * application failures, skipped verification), and confirms that no files
+ * were changed.
+ */
+export function buildWriteRefusedResponse(
+  label: string,
+  targets: WriteTargetReport[],
+  issues: string[],
+): string {
+  const refused = targets.filter((t) => t.refusedReason !== null);
+  const lines: string[] = [`## ${label} — refused`];
+  if (refused.length > 0) {
+    lines.push("", ...writeTargetLines(targets));
+  }
+  if (issues.length > 0) {
+    lines.push("", ...issues);
+  }
+  lines.push("", "No files changed.");
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines.push("", `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`);
+  return buildEnvelope(lines);
+}
+
+/**
+ * Preview response for a validated proposal (`ctx read`): what would change,
+ * the validation/preflight outcome, and the explicit note that nothing was
+ * applied and `ctx apply` is the approval action.
+ */
+export function buildWritePreviewResponse(
+  label: string,
+  targets: WriteTargetReport[],
+  statusNote: string,
+  verificationNote: string | null,
+): string {
+  const lines: string[] = [
+    `## ${label} — ready to apply`,
+    statusNote,
+    `Targets: ${targets.length} file${targets.length === 1 ? "" : "s"}`,
+    "",
+    ...writeTargetLines(targets),
+  ];
+  if (verificationNote !== null) {
+    lines.push("", verificationNote);
+  }
+  lines.push(
+    "",
+    "Nothing was changed. Apply this proposal unchanged by running `ctx apply` while it stays in the clipboard.",
+  );
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines.push("", `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`);
+  return buildEnvelope(lines);
+}
+
+/** One verification read section of an applied sequence. */
+export interface VerificationSection {
+  title: string;
+  lines: string[];
+  bytes: number;
+}
+
+/**
+ * Applied response for a write: the changed targets, then (for sequences) the
+ * verification sections that ran only after the write succeeded.
+ */
+export function buildWriteAppliedResponse(
+  label: string,
+  targets: WriteTargetReport[],
+  statusNote: string,
+  verification: VerificationSection[],
+): string {
+  const lines: string[] = [
+    `## ${label}`,
+    statusNote,
+    `Targets: ${targets.length} file${targets.length === 1 ? "" : "s"}`,
+    "",
+    ...writeTargetLines(targets),
+  ];
+  for (const section of verification) {
+    lines.push("", `## Verification: ${section.title}`);
+    lines.push(...section.lines);
+  }
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines.push("", `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`);
+  return buildEnvelope(lines);
+}
+
+/**
+ * Fail-closed response for an applied write whose verification output exceeds
+ * the total budget: the write itself is confirmed (it already happened), but
+ * the oversized verification content is not copied and the LLM is asked to
+ * reduce scope.
+ */
+export function buildWriteOversizedResponse(
+  label: string,
+  totalBytes: number,
+  maxBytes: number,
+): string {
+  const lines = [
+    `## ${label} — applied, response too large`,
+    `The write was applied, but the full verification response would be ` +
+      `${totalBytes} bytes, over the configured total budget (max_batch_bytes = ${maxBytes} bytes).`,
+    "It was not copied. Request smaller verification reads and retry with `ctx apply`.",
+  ];
+  const bytes = utf8ByteLength(lines.join("\n"));
+  lines.push("", `bytes: ${bytes} | tokens: ~${estimateTokens(bytes)}`);
+  return buildEnvelope(lines);
+}

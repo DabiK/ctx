@@ -9,6 +9,7 @@ import type {
   FsPort,
   GitDiff,
   GitLogEntry,
+  GitPatchResult,
   GitPort,
   GitShowResult,
   GitStatus,
@@ -81,6 +82,13 @@ export class FakeGit implements GitPort {
   showErrors = new Map<string, string>();
   /** When set, every port call throws (simulates a Git failure). */
   failWith: Error | null = null;
+  /** When set, `checkPatch` returns this error (e.g. git apply --check failure). */
+  checkError: string | null = null;
+  /** When set, `applyPatch` returns this error (apply fails after preflight). */
+  applyError: string | null = null;
+  /** Patch text handed to `checkPatch`/`applyPatch` (for assertions). */
+  lastCheckedPatch = "";
+  lastAppliedPatch = "";
 
   lastDiffPath: string | null = null;
   lastDiffStaged = false;
@@ -140,6 +148,22 @@ export class FakeGit implements GitPort {
     }
     return { ok: false, error: `fatal: path '${path}' does not exist in '${rev}'` };
   }
+
+  async checkPatch(_root: string, patch: string): Promise<GitPatchResult> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    this.lastCheckedPatch = patch;
+    return this.checkError === null ? { ok: true } : { ok: false, error: this.checkError };
+  }
+
+  async applyPatch(_root: string, patch: string): Promise<GitPatchResult> {
+    if (this.failWith !== null) {
+      throw this.failWith;
+    }
+    this.lastAppliedPatch = patch;
+    return this.applyError === null ? { ok: true } : { ok: false, error: this.applyError };
+  }
 }
 
 /** In-memory filesystem used by tests. */
@@ -156,7 +180,8 @@ export class FakeFs implements FsPort {
   }
 
   exists(path: string): boolean {
-    return this.files.has(path) || this.dirs.has(path);
+    // Like lstatSync, symlinks exist even before following them.
+    return this.files.has(path) || this.dirs.has(path) || this.symlinks.has(path);
   }
 
   readText(path: string): string | null {
@@ -165,6 +190,12 @@ export class FakeFs implements FsPort {
 
   writeText(path: string, content: string): void {
     this.files.set(path, content);
+  }
+
+  mkdirs(path: string): boolean {
+    this.dirs.add(path);
+    this.seedDirsFor(path + "/placeholder");
+    return true;
   }
 
   /**

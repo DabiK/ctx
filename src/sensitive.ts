@@ -33,3 +33,16 @@ export const SENSITIVE_CONTENT_PATTERNS: RegExp[] = [
 export function containsSensitiveContent(content: string): boolean {
   return SENSITIVE_CONTENT_PATTERNS.some((re) => re.test(content));
 }
+
+/**
+ * True when a unified diff *adds* lines that contain an obvious sensitive
+ * pattern. Only added lines are checked, so a cleanup diff that removes a
+ * leaked key is not blocked; a diff that introduces one is refused without an
+ * explicit override.
+ */
+export function diffAddsSensitiveContent(diff: string): boolean {
+  const added = diff
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"));
+  return containsSensitiveContent(added.join("\n"));
+}

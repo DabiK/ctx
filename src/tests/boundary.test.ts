@@ -150,4 +150,78 @@ describe("PathGuard", () => {
     const { guard } = setup();
     assert.ok(guard({ configText: "garbage ===" }).guard("src/app.ts").ok);
   });
+
+  it("guardWrite accepts a new file under an existing directory", () => {
+    const { guard } = setup();
+    const result = guard().guardWrite("src/new.ts");
+    assert.deepEqual(result, { ok: true, kind: "ok", absPath: `${ROOT}/src/new.ts`, relPath: "src/new.ts" });
+  });
+
+  it("guardWrite accepts replacing an existing file", () => {
+    const { guard } = setup();
+    assert.ok(guard().guardWrite("src/app.ts").ok);
+  });
+
+  it("guardWrite refuses traversal, absolute paths, and empty paths", () => {
+    const { guard } = setup();
+    assert.ok(!guard().guardWrite("../x.ts").ok);
+    assert.ok(!guard().guardWrite("/etc/x").ok);
+    assert.ok(!guard().guardWrite("").ok);
+  });
+
+  it("guardWrite refuses sensitive and ignored targets", () => {
+    const { guard } = setup();
+    const sensitive = guard().guardWrite(".env");
+    assert.ok(!sensitive.ok);
+    if (!sensitive.ok) {
+      assert.ok(sensitive.reason.includes("sensitive path"));
+    }
+    const ignored = guard().guardWrite("dist/bundle.js");
+    assert.ok(!ignored.ok);
+    if (!ignored.ok) {
+      assert.ok(ignored.reason.includes(".ctxignore"));
+    }
+  });
+
+  it("guardWrite refuses the permission-boundary files", () => {
+    const { guard } = setup();
+    for (const name of [".ctx.toml", ".ctxignore"]) {
+      const result = guard().guardWrite(name);
+      assert.ok(!result.ok);
+      if (!result.ok) {
+        assert.ok(result.reason.includes("permission boundary"));
+      }
+    }
+  });
+
+  it("guardWrite refuses an existing directory target", () => {
+    const { guard } = setup();
+    const result = guard().guardWrite("docs");
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.reason.includes("directory"));
+    }
+  });
+
+  it("guardWrite refuses a target resolving outside the root via symlink", () => {
+    const { fs, guard } = setup();
+    fs.seedSymlink(`${ROOT}/escape-dir`, "/outside");
+    const file = guard().guardWrite("escape-dir/secret.ts");
+    assert.ok(!file.ok);
+    if (!file.ok) {
+      assert.ok(file.reason.includes("outside the repository root"));
+    }
+    const direct = guard().guardWrite("escape.ts");
+    assert.ok(!direct.ok);
+    if (!direct.ok) {
+      assert.ok(direct.reason.includes("outside the repository root"));
+    }
+  });
+
+  it("guardWrite allows a new file through an in-root symlinked directory", () => {
+    const { fs, guard } = setup();
+    fs.seedSymlink(`${ROOT}/docs-link`, `${ROOT}/docs`);
+    const result = guard().guardWrite("docs-link/new.md");
+    assert.ok(result.ok);
+  });
 });

@@ -399,4 +399,55 @@ describe("runCli", () => {
     assert.ok(copied.includes("- src/app.ts"));
     assert.ok(copied.includes("## Diff src/app.ts (staged)"));
   });
+
+  it("applies a write proposal from the clipboard through the apply command", async () => {
+    const { ports, clipboard, git, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "alpha\n");
+    clipboard.content = [
+      "@ctx write src/app.ts",
+      "```",
+      "alpha\nchanged",
+      "```",
+    ].join("\n");
+
+    const code = await runCli(["apply"], ports);
+
+    assert.equal(code, 0);
+    assert.equal(fs.readText("/repo/src/app.ts"), "alpha\nchanged");
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Write applied"));
+  });
+
+  it("applies a @ctx patch from the clipboard through the apply command", async () => {
+    const { ports, clipboard, git, fs } = fakePorts();
+    fs.seed("/repo/src/app.ts", "alpha\n");
+    clipboard.content = [
+      "@ctx patch",
+      "diff --git a/src/app.ts b/src/app.ts",
+      "index 111..222 100644",
+      "--- a/src/app.ts",
+      "+++ b/src/app.ts",
+      "@@ -1 +1 @@",
+      "-alpha",
+      "+ALPHA",
+    ].join("\n");
+
+    const code = await runCli(["apply"], ports);
+
+    assert.equal(code, 0);
+    assert.ok(git.lastAppliedPatch.includes("+ALPHA"));
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Patch applied"));
+  });
+
+  it("refuses apply when the clipboard holds no write proposal", async () => {
+    const { ports, clipboard } = fakePorts();
+    clipboard.content = "@ctx status";
+
+    const code = await runCli(["apply"], ports);
+
+    assert.equal(code, 1);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("no write proposal found"));
+  });
 });

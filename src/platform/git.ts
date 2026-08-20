@@ -10,12 +10,13 @@
  * functions so they stay unit-testable on any host.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type {
   GitDiff,
   GitFileState,
   GitLogEntry,
+  GitPatchResult,
   GitPort,
   GitShowResult,
   GitStatus,
@@ -113,6 +114,70 @@ export class SystemGit implements GitPort {
     } catch (err) {
       return { ok: false, error: stderrOf(err) ?? "git show failed" };
     }
+  }
+
+  /** `git apply --check` — verify the patch applies without changing anything. */
+  async checkPatch(root: string, patch: string): Promise<GitPatchResult> {
+    const result = await this.gitWithStdin(["apply", "--check", "-"], root, patch);
+    if (result.code === 0) {
+      return { ok: true };
+    }
+    return { ok: false, error: trimStderr(result.stderr) ?? "git apply --check failed" };
+  }
+
+  /** `git apply` — apply the patch to the working tree (Git is the recovery path). */
+  async applyPatch(root: string, patch: string): Promise<GitPatchResult> {
+    const result = await this.gitWithStdin(["apply", "-"], root, patch);
+    if (result.code === 0) {
+      return { ok: true };
+    }
+    return { ok: false, error: trimStderr(result.stderr) ?? "git apply failed" };
+  }
+
+  /**
+   * Run `git` with `input` on stdin (used by the patch operations; the patch
+   * is never written to disk). Returns the exit code and captured output.
+   */
+  private async gitWithStdin(
+    args: string[],
+    cwd: string,
+    input: string,
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        child.kill("SIGKILL");
+        reject(new Error(`git ${args[0]} timed out`));
+      }, GIT_TIMEOUT);
+      child.stdout.on("data", (d: Buffer) => {
+        stdout += d.toString("utf8");
+      });
+      child.stderr.on("data", (d: Buffer) => {
+        stderr += d.toString("utf8");
+      });
+      child.on("error", (err: Error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+      child.on("close", (code) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ code: code ?? -1, stdout, stderr });
+        }
+      });
+      child.stdin.on("error", () => {
+        // Git may exit before stdin closes; the close event carries the result.
+      });
+      child.stdin.end(input);
+    });
   }
 }
 
@@ -258,4 +323,10 @@ function stderrOf(err: unknown): string | null {
     return text === "" ? null : text;
   }
   return null;
+}
+
+/** Trimmed non-empty stderr text, or `null`. */
+function trimStderr(text: string): string | null {
+  const trimmed = text.trim();
+  return trimmed === "" ? null : trimmed;
 }

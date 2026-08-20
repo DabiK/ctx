@@ -128,7 +128,7 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #3 Safe clipboard file context.
   >
 
-- [ ] #7 — Controlled writes and sequences (labels: ready-for-agent)
+- [x] #7 — Controlled writes and sequences (labels: ready-for-agent)
 
   **Issue #7 — détail complet**
   > ## Parent
@@ -143,11 +143,11 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   >
   > ## Acceptance criteria
   >
-  > - [ ] A tagged multi-file patch is recognised separately from ordinary `ctx diff` read output and is preflighted before any file changes.
-  > - [ ] A valid full-file write creates or replaces only a validated non-sensitive path; missing parent directories are created as part of the accepted operation.
-  > - [ ] Invalid patches and denied writes change no files and produce a structured diagnostic for the LLM/user.
-  > - [ ] A sequence runs its verification reads only after the proposed patch/write succeeds; failures skip later steps and report why.
-  > - [ ] Integration tests cover patch success/failure, multiple files, full writes, sensitive-write refusal, and sequence conditional behavior in a temporary Git repository.
+  > - [x] A tagged multi-file patch is recognised separately from ordinary `ctx diff` read output and is preflighted before any file changes.
+  > - [x] A valid full-file write creates or replaces only a validated non-sensitive path; missing parent directories are created as part of the accepted operation.
+  > - [x] Invalid patches and denied writes change no files and produce a structured diagnostic for the LLM/user.
+  > - [x] A sequence runs its verification reads only after the proposed patch/write succeeds; failures skip later steps and report why.
+  > - [x] Integration tests cover patch success/failure, multiple files, full writes, sensitive-write refusal, and sequence conditional behavior in a temporary Git repository.
   >
   > ## Blocked by
   >

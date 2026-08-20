@@ -4,18 +4,29 @@
  * This build supports the read operations `@ctx file <path>[:<start>-<end>]`,
  * `@ctx files <path>[:<range>] <path>...`, the discovery operations
  * `@ctx tree [--depth N]`, `@ctx glob <pattern>`, `@ctx inspect [path]`, and
- * `@ctx search <query>`, and the read-only Git context operations
+ * `@ctx search <query>`, the read-only Git context operations
  * `@ctx status`, `@ctx changed [path]`, `@ctx diff [--staged] [path]`,
- * `@ctx log [--limit N] [path]`, and `@ctx show <rev> <path>`.
+ * `@ctx log [--limit N] [path]`, and `@ctx show <rev> <path>`, and the
+ * controlled-write proposals `@ctx patch` (one multi-file unified diff body),
+ * `@ctx write <path>` (a full-file body), and `@ctx sequence` (one write
+ * proposal followed by verification reads that run only after the write).
  *
- * `@ctx batch` composes several operations into one response: the `@ctx`
- * lines that follow it (in declared order) are its members, so a batch is a
- * flattened container, not a nested grammar. A batch must contain at least
- * one operation and cannot contain another `@ctx batch` (malformed nesting is
- * refused up front). Everything else is a structured refusal so the LLM
- * receives a safe next request. Non-`@ctx` lines (ordinary chat text) are
- * ignored. Malformed inputs never touch the filesystem or run any Git
- * command.
+ * `@ctx batch` composes several read operations into one response: the
+ * `@ctx` lines that follow it (in declared order) are its members, so a
+ * batch is a flattened container, not a nested grammar. A batch must contain
+ * at least one operation and cannot contain another `@ctx batch` (malformed
+ * nesting is refused up front). Write proposals are never batch members: a
+ * proposal request must contain exactly one proposal (or be a `@ctx
+ * sequence`, whose first member is the write and whose remaining members are
+ * reads).
+ *
+ * Proposal bodies span multiple lines: after a `@ctx patch` or
+ * `@ctx write <path>` line, every following line (until the next `@ctx` line
+ * or the end of the text) is the body. A fenced body (``` or ~~~) must close
+ * before the next `@ctx` line; trailing content after the closing fence is
+ * refused. Everything else is a structured refusal so the LLM receives a
+ * safe next request. Non-`@ctx` lines (ordinary chat text) are ignored.
+ * Malformed inputs never touch the filesystem or run any Git command.
  */
 
 import { REQUEST_MARKER } from "./branding.js";
@@ -27,8 +38,8 @@ export interface LineRange {
   end: number;
 }
 
-/** One parsed operation of a clipboard request. */
-export type RequestOp =
+/** One parsed read operation of a clipboard request. */
+export type ReadOp =
   | { kind: "file"; specs: string[] }
   | { kind: "files"; specs: string[] }
   | { kind: "tree"; depth: number | null }
@@ -41,13 +52,41 @@ export type RequestOp =
   | { kind: "log"; limit: number | null; path: string | null }
   | { kind: "show"; rev: string; path: string };
 
+/** One controlled-write proposal: a multi-file patch or a full-file write. */
+export type ProposalOp =
+  | { kind: "patch"; diff: string }
+  | { kind: "write"; path: string; content: string };
+
+/** One parsed operation of a clipboard request. */
+export type RequestOp =
+  | ReadOp
+  | ProposalOp
+  | { kind: "sequence"; write: ProposalOp; verify: ReadOp[] };
+
+/** Type guard: true when the operation is a plain read operation. */
+export function isReadOp(op: RequestOp): op is ReadOp {
+  return op.kind !== "patch" && op.kind !== "write" && op.kind !== "sequence";
+}
+
+/** Type guard: true when the operation is a write proposal (patch or write). */
+export function isProposalOp(op: RequestOp): op is ProposalOp {
+  return op.kind === "patch" || op.kind === "write";
+}
+
 export type ParsedRequest =
-  | { ok: true; ops: RequestOp[]; /** True when the request used the `@ctx batch` container. */ batch: boolean }
+  | {
+      ok: true;
+      ops: RequestOp[];
+      /** True when the request used the `@ctx batch` container. */
+      batch: boolean;
+      /** True when the request is a `@ctx sequence` proposal. */
+      sequence: boolean;
+    }
   | { ok: false; reason: string };
 
 /** Supported operations in this build, for refusal responses. */
 export const SUPPORTED_OPS =
-  "batch (a block of @ctx operations), file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], search <query>, status, changed [path], diff [--staged] [path], log [--limit N] [path], and show <rev> <path>";
+  "batch (a block of @ctx read operations), file <path>[:<start>-<end>], files <path>..., tree [--depth N], glob <pattern>, inspect [path], search <query>, status, changed [path], diff [--staged] [path], log [--limit N] [path], show <rev> <path>, patch (a unified multi-file diff body), write <path> (a full-file body), and sequence (one write proposal followed by verification reads)";
 
 /**
  * True when `rev` is a safe, unambiguous Git revision for `show`: HEAD (with
@@ -100,6 +139,156 @@ export function isSafeShowPath(path: string): boolean {
     !trimmed.endsWith("/") &&
     !trimmed.endsWith("\\")
   );
+}
+
+/**
+ * True when a write path is syntactically safe: repository-relative (no
+ * absolute path, no `..` traversal) and non-empty. Unlike `show` paths,
+ * `:`/`%` characters are allowed because the write target is resolved by the
+ * filesystem port, not handed to Git path syntax. The full boundary check
+ * (existence, symlink resolution, ignore and sensitive rules) happens in the
+ * write guard before any change.
+ */
+export function isSafeWritePath(path: string): boolean {
+  const trimmed = path.trim();
+  if (trimmed === "" || trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return false;
+  }
+  const segments = trimmed.split(/[\\/]+/).filter((s) => s.length > 0);
+  return (
+    segments.length > 0 &&
+    !segments.some((s) => s === ".." || s === ".") &&
+    !trimmed.endsWith("/") &&
+    !trimmed.endsWith("\\")
+  );
+}
+
+/**
+ * Split a proposal body into fenced content. A body whose first non-empty
+ * line opens a ``` or ~~~ fence must close with a matching fence; the content
+ * between the fences is returned verbatim (the language tag on the opening
+ * fence is dropped). Content after the closing fence is refused, and an
+ * opening fence without a closing one is refused. Unfenced bodies are
+ * returned raw with leading/trailing blank lines trimmed.
+ */
+export function splitFencedBody(
+  lines: string[],
+  label: string,
+): { ok: true; content: string } | { ok: false; reason: string } {
+  const firstNonEmpty = lines.findIndex((l) => l.trim() !== "");
+  if (firstNonEmpty === -1) {
+    return { ok: true, content: "" };
+  }
+  const opener = (lines[firstNonEmpty] ?? "").trim();
+  const fenceChar = opener.startsWith("```") ? "`" : opener.startsWith("~~~") ? "~" : null;
+  if (fenceChar === null) {
+    return { ok: true, content: trimBlankEdges(lines).join("\n") };
+  }
+  const closer = new RegExp(`^${fenceChar}{3,}\\s*$`);
+  let closerIdx = -1;
+  for (let i = firstNonEmpty + 1; i < lines.length; i++) {
+    if (closer.test(lines[i] ?? "")) {
+      closerIdx = i;
+      break;
+    }
+  }
+  if (closerIdx === -1) {
+    return {
+      ok: false,
+      reason: `unterminated fenced block in the ${label} — the body must close with a matching fence`,
+    };
+  }
+  for (let i = closerIdx + 1; i < lines.length; i++) {
+    if ((lines[i] ?? "").trim() !== "") {
+      return {
+        ok: false,
+        reason: `unexpected content after the closing fence of the ${label}`,
+      };
+    }
+  }
+  return { ok: true, content: lines.slice(firstNonEmpty + 1, closerIdx).join("\n") };
+}
+
+/** One file a unified diff touches, with its change kind. */
+export interface DiffTarget {
+  /** Repository-relative target path (a/ and b/ prefixes stripped). */
+  relPath: string;
+  /** Change kind: "new file", "deleted", "renamed", or "modified". */
+  kind: string;
+}
+
+/**
+ * Extract the files a unified diff touches (pure). Targets come from the
+ * `---`/`+++` file headers and `rename to` lines, with the conventional `a/`
+ * and `b/` prefixes stripped so boundary validation matches what `git apply`
+ * would write. Duplicate targets (e.g. a rename with `+++`) are merged.
+ */
+export function extractDiffTargets(diff: string): DiffTarget[] {
+  const targets: DiffTarget[] = [];
+  let currentKind = "modified";
+  let currentOldPath: string | null = null;
+
+  const push = (relPath: string, kind: string): void => {
+    if (
+      relPath !== "" &&
+      relPath !== "/dev/null" &&
+      !targets.some((t) => t.relPath === relPath)
+    ) {
+      targets.push({ relPath, kind });
+    }
+  };
+
+  for (const raw of diff.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith("diff --git ")) {
+      currentKind = "modified";
+      currentOldPath = null;
+    } else if (line.startsWith("new file mode ")) {
+      currentKind = "new file";
+    } else if (line.startsWith("deleted file mode ")) {
+      currentKind = "deleted";
+    } else if (line.startsWith("rename from ")) {
+      currentKind = "renamed";
+      currentOldPath = stripDiffPrefix(line.slice(12).trim());
+    } else if (line.startsWith("rename to ")) {
+      push(stripDiffPrefix(line.slice(10).trim()), "renamed");
+    } else if (line.startsWith("--- ")) {
+      currentOldPath = stripDiffPrefix(line.slice(4).trim());
+    } else if (line.startsWith("+++ ")) {
+      const path = stripDiffPrefix(line.slice(4).trim());
+      if (path === "/dev/null") {
+        // Deletion: the target is the old path; the git default kind applies
+        // unless the header said `deleted file mode`.
+        if (currentOldPath !== null && currentOldPath !== "/dev/null") {
+          push(currentOldPath, currentKind === "modified" ? "deleted" : currentKind);
+        }
+      } else {
+        push(path, currentKind);
+      }
+    }
+  }
+  return targets;
+}
+
+/** Strip the git `a/`/`b/` prefix a `---`/`+++` path may carry. */
+function stripDiffPrefix(path: string): string {
+  if (path.startsWith("a/") || path.startsWith("b/")) {
+    return path.slice(2);
+  }
+  return path;
+}
+
+/** Trim leading and trailing blank lines (used for unfenced bodies). */
+function trimBlankEdges(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && (lines[start] ?? "").trim() === "") {
+    start++;
+  }
+  while (end > start && (lines[end - 1] ?? "").trim() === "") {
+    end--;
+  }
+  return lines.slice(start, end);
 }
 
 export type PathSpec =
@@ -176,8 +365,9 @@ export function parsePathSpec(spec: string): PathSpec {
 
 /**
  * Parse a full clipboard request into the operations it contains.
- * Non-`@ctx` lines are ignored; an `@ctx` line for an unsupported operation
- * refuses the whole request.
+ * Non-`@ctx` lines are ordinary chat text and are ignored, except as the body
+ * of a `patch` or `write` proposal that directly precedes them; an `@ctx`
+ * line for an unsupported operation refuses the whole request.
  */
 export function parseRequestText(text: string): ParsedRequest {
   const ops: RequestOp[] = [];
@@ -185,17 +375,100 @@ export function parseRequestText(text: string): ParsedRequest {
   let inBatch = false;
   let sawBatch = false;
   let batchMemberCount = 0;
+  let inSequence = false;
+  let sawSequence = false;
+  let sequenceMemberCount = 0;
+  let seqWrite: ProposalOp | null = null;
+  let seqVerify: ReadOp[] = [];
+  // Collecting state of a multi-line proposal body.
+  let collecting: "patch" | "write" | null = null;
+  let bodyLines: string[] = [];
+  let writePath: string | null = null;
+  // True while collecting the inside of an opened fence (``` or ~~~); @ctx
+  // lines inside a fence are body content, not request lines.
+  let inFence = false;
 
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === "") {
-      continue;
+  const lines = text.split(/\r?\n/);
+
+  const finalizeBody = (): ParsedRequest | null => {
+    if (collecting === null) {
+      return null;
     }
-    if (!line.startsWith(REQUEST_MARKER)) {
+    const kind = collecting;
+    collecting = null;
+    const label = kind === "patch" ? "patch" : "write";
+    const split = splitFencedBody(bodyLines, label);
+    const hadBodyContent = bodyLines.some((l) => l.trim() !== "");
+    bodyLines = [];
+    if (!split.ok) {
+      return { ok: false, reason: split.reason };
+    }
+    if (kind === "patch") {
+      if (!hadBodyContent) {
+        return { ok: false, reason: `empty ${REQUEST_MARKER} patch — the unified diff body is missing` };
+      }
+      const diff = split.content.endsWith("\n") ? split.content : split.content + "\n";
+      const op: ProposalOp = { kind: "patch", diff };
+      if (inSequence) {
+        if (seqWrite === null) {
+          seqWrite = op;
+        } else {
+          return { ok: false, reason: "a sequence accepts exactly one write proposal (its first member)" };
+        }
+      } else {
+        ops.push(op);
+      }
+    } else {
+      const path = writePath ?? "";
+      if (!hadBodyContent) {
+        return { ok: false, reason: `empty ${REQUEST_MARKER} write — the full-file body is missing` };
+      }
+      const op: ProposalOp = { kind: "write", path, content: split.content };
+      if (inSequence) {
+        if (seqWrite === null) {
+          seqWrite = op;
+        } else {
+          return { ok: false, reason: "a sequence accepts exactly one write proposal (its first member)" };
+        }
+      } else {
+        ops.push(op);
+      }
+    }
+    return null;
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (collecting !== null) {
+      // Inside a proposal body. A request line ends the body (unless we are
+      // inside an opened fence, where @ctx-looking lines are content).
+      if (!inFence && trimmed.startsWith(REQUEST_MARKER)) {
+        const finalized = finalizeBody();
+        if (finalized !== null) {
+          return finalized;
+        }
+      } else {
+        if (inFence && /^(`{3,}|~{3,})\s*$/.test(trimmed)) {
+          inFence = false;
+        } else if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+          inFence = true;
+        }
+        bodyLines.push(rawLine);
+        continue;
+      }
+    } else if (!trimmed.startsWith(REQUEST_MARKER)) {
+      // Ordinary chat text outside any proposal body.
       continue;
     }
     sawRequest = true;
-    const rest = line.slice(REQUEST_MARKER.length).trim();
+
+    // An @ctx line ends any proposal body collected so far.
+    const finalized = finalizeBody();
+    if (finalized !== null) {
+      return finalized;
+    }
+
+    const rest = trimmed.slice(REQUEST_MARKER.length).trim();
     if (rest === "") {
       return { ok: false, reason: `empty ${REQUEST_MARKER} request` };
     }
@@ -203,6 +476,13 @@ export function parseRequestText(text: string): ParsedRequest {
     const op = tokens[0] ?? "";
     const args = tokens.slice(1);
     if (op === "batch") {
+      if (inSequence) {
+        return {
+          ok: false,
+          reason:
+            `malformed nesting — \`${REQUEST_MARKER} batch\` cannot appear inside a \`${REQUEST_MARKER} sequence\``,
+        };
+      }
       if (args.length !== 0) {
         return {
           ok: false,
@@ -220,166 +500,102 @@ export function parseRequestText(text: string): ParsedRequest {
       sawBatch = true;
       continue;
     }
-    if (op === "file") {
-      if (args.length !== 1) {
+    if (op === "sequence") {
+      if (inBatch) {
         return {
           ok: false,
-          reason: `\`${REQUEST_MARKER} file\` accepts exactly one path (got ${args.length})`,
+          reason:
+            `malformed nesting — \`${REQUEST_MARKER} sequence\` cannot appear inside a \`${REQUEST_MARKER} batch\``,
         };
       }
-      ops.push({ kind: "file", specs: [args[0] ?? ""] });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "files") {
-      if (args.length === 0) {
-        return { ok: false, reason: `\`${REQUEST_MARKER} files\` requires at least one path` };
-      }
-      ops.push({ kind: "files", specs: args });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "tree") {
-      let depth: number | null = null;
-      if (args.length === 2 && (args[0] ?? "") === "--depth") {
-        const n = Number(args[1]);
-        if (!Number.isInteger(n) || n < 1 || n > MAX_DEPTH) {
-          return {
-            ok: false,
-            reason: `\`${REQUEST_MARKER} tree --depth\` requires an integer between 1 and ${MAX_DEPTH}`,
-          };
-        }
-        depth = n;
-      } else if (args.length !== 0) {
+      if (inSequence) {
         return {
           ok: false,
-          reason: `\`${REQUEST_MARKER} tree\` accepts only an optional --depth N (got: ${args.join(" ")})`,
+          reason:
+            `malformed nesting — \`${REQUEST_MARKER} sequence\` cannot appear inside another sequence`,
         };
       }
-      ops.push({ kind: "tree", depth });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "glob") {
-      if (args.length !== 1) {
-        return {
-          ok: false,
-          reason: `\`${REQUEST_MARKER} glob\` requires exactly one pattern (got ${args.length})`,
-        };
-      }
-      ops.push({ kind: "glob", pattern: args[0] ?? "" });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "inspect") {
-      if (args.length > 1) {
-        return {
-          ok: false,
-          reason: `\`${REQUEST_MARKER} inspect\` accepts at most one optional path (got ${args.length})`,
-        };
-      }
-      ops.push({ kind: "inspect", path: args[0] ?? null });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "search") {
-      if (args.length === 0) {
-        return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires at least one query term` };
-      }
-      let query = args.join(" ");
-      // `@ctx search "foo bar"` — strip the wrapper quotes the LLM may add.
-      if (query.length >= 2 && query.startsWith('"') && query.endsWith('"')) {
-        query = query.slice(1, -1);
-      }
-      if (query === "") {
-        return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires a non-empty query` };
-      }
-      ops.push({ kind: "search", query });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "status") {
       if (args.length !== 0) {
         return {
           ok: false,
-          reason: `\`${REQUEST_MARKER} status\` accepts no arguments (got: ${args.join(" ")})`,
+          reason: `\`${REQUEST_MARKER} sequence\` accepts no arguments (got: ${args.join(" ")})`,
         };
       }
-      ops.push({ kind: "status" });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "changed") {
-      if (args.length > 1) {
-        return {
-          ok: false,
-          reason: `\`${REQUEST_MARKER} changed\` accepts at most one optional path (got ${args.length})`,
-        };
-      }
-      ops.push({ kind: "changed", path: args[0] ?? null });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "diff") {
-      let staged = false;
-      let path: string | null = null;
-      for (const arg of args) {
-        if (arg === "--staged") {
-          staged = true;
-        } else if (path === null) {
-          path = arg;
-        } else {
-          return {
-            ok: false,
-            reason: `\`${REQUEST_MARKER} diff\` accepts only [--staged] and one optional path (got: ${args.join(" ")})`,
-          };
-        }
-      }
-      ops.push({ kind: "diff", staged, path });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "log") {
-      let limit: number | null = null;
-      let path: string | null = null;
-      for (let i = 0; i < args.length; i++) {
-        const arg = args[i] ?? "";
-        if (arg === "--limit") {
-          const n = Number(args[i + 1]);
-          if (!Number.isInteger(n) || n < 1 || n > MAX_RESULTS) {
-            return {
-              ok: false,
-              reason: `\`${REQUEST_MARKER} log --limit\` requires an integer between 1 and ${MAX_RESULTS}`,
-            };
-          }
-          limit = n;
-          i++;
-        } else if (path === null) {
-          path = arg;
-        } else {
-          return {
-            ok: false,
-            reason: `\`${REQUEST_MARKER} log\` accepts only [--limit N] and one optional path (got: ${args.join(" ")})`,
-          };
-        }
-      }
-      ops.push({ kind: "log", limit, path });
-      if (inBatch) batchMemberCount++;
-    } else if (op === "show") {
-      if (args.length !== 2) {
-        return {
-          ok: false,
-          reason: `\`${REQUEST_MARKER} show\` requires exactly <rev> and <path> (got ${args.length})`,
-        };
-      }
-      const rev = args[0] ?? "";
-      const path = args[1] ?? "";
-      if (!isSafeRevision(rev)) {
+      inSequence = true;
+      sawSequence = true;
+      continue;
+    }
+    if (op === "patch" || op === "write") {
+      if (inBatch) {
         return {
           ok: false,
           reason:
-            `unsafe revision \`${rev}\` — show accepts only HEAD (with ~N/^N), ` +
-            `hex commit hashes, or plain branch/tag names`,
+            `\`${REQUEST_MARKER} ${op}\` is a write proposal and cannot be a \`${REQUEST_MARKER} batch\` member — ` +
+            `use a standalone proposal or a \`${REQUEST_MARKER} sequence\``,
         };
       }
-      if (!isSafeShowPath(path)) {
+      if (op === "write") {
+        if (args.length !== 1) {
+          return {
+            ok: false,
+            reason: `\`${REQUEST_MARKER} write\` requires exactly one repository-relative path (got ${args.length})`,
+          };
+        }
+        const path = args[0] ?? "";
+        if (!isSafeWritePath(path)) {
+          return {
+            ok: false,
+            reason:
+              `unsafe write path \`${path}\` — write paths must be repository-relative ` +
+              `and free of traversal`,
+          };
+        }
+        writePath = path;
+      } else if (args.length !== 0) {
         return {
           ok: false,
-          reason:
-            `unsafe path \`${path}\` — show paths must be repository-relative ` +
-            `and free of traversal and \`:\`/\`%\` characters`,
+          reason: `\`${REQUEST_MARKER} patch\` accepts no arguments (got: ${args.join(" ")})`,
         };
       }
-      ops.push({ kind: "show", rev, path });
-      if (inBatch) batchMemberCount++;
-    } else {
+      collecting = op;
+      if (inSequence) {
+        sequenceMemberCount++;
+      }
+      continue;
+    }
+    // A read operation. Inside a sequence it is a verification read; the
+    // first member of a sequence must be the write proposal.
+    if (inSequence && sequenceMemberCount === 0) {
       return {
         ok: false,
-        reason: `unsupported operation \`${op}\``,
+        reason:
+          `a \`${REQUEST_MARKER} sequence\` must start with one \`${REQUEST_MARKER} patch\` or ` +
+          `\`${REQUEST_MARKER} write\` write proposal`,
       };
     }
+    const readOp = parseReadOp(op, args);
+    if ("unsupported" in readOp) {
+      return { ok: false, reason: `unsupported operation \`${op}\`` };
+    }
+    if (!readOp.ok) {
+      return { ok: false, reason: readOp.reason };
+    }
+    if (inSequence) {
+      sequenceMemberCount++;
+      seqVerify.push(readOp.op);
+    } else if (inBatch) {
+      batchMemberCount++;
+      ops.push(readOp.op);
+    } else {
+      ops.push(readOp.op);
+    }
+    continue;
+  }
+
+  // End of text: finalize a trailing proposal body.
+  const finalized = finalizeBody();
+  if (finalized !== null) {
+    return finalized;
   }
 
   if (!sawRequest) {
@@ -391,8 +607,205 @@ export function parseRequestText(text: string): ParsedRequest {
       reason: `empty ${REQUEST_MARKER} batch — add at least one operation after \`${REQUEST_MARKER} batch\``,
     };
   }
+  if (sawSequence) {
+    if (seqWrite === null) {
+      return {
+        ok: false,
+        reason:
+          `empty ${REQUEST_MARKER} sequence — add one \`${REQUEST_MARKER} patch\` or ` +
+          `\`${REQUEST_MARKER} write\` write proposal, then verification reads`,
+      };
+    }
+    if (seqVerify.length === 0) {
+      return {
+        ok: false,
+        reason:
+          `\`${REQUEST_MARKER} sequence\` needs at least one verification read after the write proposal`,
+      };
+    }
+    ops.push({ kind: "sequence", write: seqWrite, verify: seqVerify });
+  }
   if (ops.length === 0) {
     return { ok: false, reason: "request contained no supported operations" };
   }
-  return { ok: true, ops, batch: sawBatch };
+
+  // A write proposal must be the whole request (standalone or the single
+  // sequence op). Mixing a proposal with unrelated operations is refused.
+  const proposalIndex = ops.findIndex(
+    (o) => o.kind === "patch" || o.kind === "write" || o.kind === "sequence",
+  );
+  if (proposalIndex !== -1 && ops.length !== 1) {
+    return {
+      ok: false,
+      reason:
+        `a write proposal must be the only operation in the request ` +
+        `(or the first member of a \`${REQUEST_MARKER} sequence\`)`,
+    };
+  }
+
+  return { ok: true, ops, batch: sawBatch, sequence: sawSequence };
+}
+
+/** Parse one read operation from its name and arguments, or an error reason. */
+type ReadOpParse =
+  | { ok: true; op: ReadOp }
+  | { ok: false; reason: string }
+  | { unsupported: true };
+
+function parseReadOp(op: string, args: string[]): ReadOpParse {
+  if (op === "file") {
+    if (args.length !== 1) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} file\` accepts exactly one path (got ${args.length})`,
+      };
+    }
+    return { ok: true, op: { kind: "file", specs: [args[0] ?? ""] } };
+  }
+  if (op === "files") {
+    if (args.length === 0) {
+      return { ok: false, reason: `\`${REQUEST_MARKER} files\` requires at least one path` };
+    }
+    return { ok: true, op: { kind: "files", specs: args } };
+  }
+  if (op === "tree") {
+    let depth: number | null = null;
+    if (args.length === 2 && (args[0] ?? "") === "--depth") {
+      const n = Number(args[1]);
+      if (!Number.isInteger(n) || n < 1 || n > MAX_DEPTH) {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} tree --depth\` requires an integer between 1 and ${MAX_DEPTH}`,
+        };
+      }
+      depth = n;
+    } else if (args.length !== 0) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} tree\` accepts only an optional --depth N (got: ${args.join(" ")})`,
+      };
+    }
+    return { ok: true, op: { kind: "tree", depth } };
+  }
+  if (op === "glob") {
+    if (args.length !== 1) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} glob\` requires exactly one pattern (got ${args.length})`,
+      };
+    }
+    return { ok: true, op: { kind: "glob", pattern: args[0] ?? "" } };
+  }
+  if (op === "inspect") {
+    if (args.length > 1) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} inspect\` accepts at most one optional path (got ${args.length})`,
+      };
+    }
+    return { ok: true, op: { kind: "inspect", path: args[0] ?? null } };
+  }
+  if (op === "search") {
+    if (args.length === 0) {
+      return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires at least one query term` };
+    }
+    let query = args.join(" ");
+    // `@ctx search "foo bar"` — strip the wrapper quotes the LLM may add.
+    if (query.length >= 2 && query.startsWith('"') && query.endsWith('"')) {
+      query = query.slice(1, -1);
+    }
+    if (query === "") {
+      return { ok: false, reason: `\`${REQUEST_MARKER} search\` requires a non-empty query` };
+    }
+    return { ok: true, op: { kind: "search", query } };
+  }
+  if (op === "status") {
+    if (args.length !== 0) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} status\` accepts no arguments (got: ${args.join(" ")})`,
+      };
+    }
+    return { ok: true, op: { kind: "status" } };
+  }
+  if (op === "changed") {
+    if (args.length > 1) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} changed\` accepts at most one optional path (got ${args.length})`,
+      };
+    }
+    return { ok: true, op: { kind: "changed", path: args[0] ?? null } };
+  }
+  if (op === "diff") {
+    let staged = false;
+    let path: string | null = null;
+    for (const arg of args) {
+      if (arg === "--staged") {
+        staged = true;
+      } else if (path === null) {
+        path = arg;
+      } else {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} diff\` accepts only [--staged] and one optional path (got: ${args.join(" ")})`,
+        };
+      }
+    }
+    return { ok: true, op: { kind: "diff", staged, path } };
+  }
+  if (op === "log") {
+    let limit: number | null = null;
+    let path: string | null = null;
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i] ?? "";
+      if (arg === "--limit") {
+        const n = Number(args[i + 1]);
+        if (!Number.isInteger(n) || n < 1 || n > MAX_RESULTS) {
+          return {
+            ok: false,
+            reason: `\`${REQUEST_MARKER} log --limit\` requires an integer between 1 and ${MAX_RESULTS}`,
+          };
+        }
+        limit = n;
+        i++;
+      } else if (path === null) {
+        path = arg;
+      } else {
+        return {
+          ok: false,
+          reason: `\`${REQUEST_MARKER} log\` accepts only [--limit N] and one optional path (got: ${args.join(" ")})`,
+        };
+      }
+    }
+    return { ok: true, op: { kind: "log", limit, path } };
+  }
+  if (op === "show") {
+    if (args.length !== 2) {
+      return {
+        ok: false,
+        reason: `\`${REQUEST_MARKER} show\` requires exactly <rev> and <path> (got ${args.length})`,
+      };
+    }
+    const rev = args[0] ?? "";
+    const path = args[1] ?? "";
+    if (!isSafeRevision(rev)) {
+      return {
+        ok: false,
+        reason:
+          `unsafe revision \`${rev}\` — show accepts only HEAD (with ~N/^N), ` +
+          `hex commit hashes, or plain branch/tag names`,
+      };
+    }
+    if (!isSafeShowPath(path)) {
+      return {
+        ok: false,
+        reason:
+          `unsafe path \`${path}\` — show paths must be repository-relative ` +
+          `and free of traversal and \`:\`/\`%\` characters`,
+      };
+    }
+    return { ok: true, op: { kind: "show", rev, path } };
+  }
+  return { unsupported: true };
 }

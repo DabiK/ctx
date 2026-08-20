@@ -5,7 +5,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { parsePathSpec, parseRequestText, isSafeRevision, isSafeShowPath } from "../protocol.js";
+import {
+  extractDiffTargets,
+  isSafeWritePath,
+  parsePathSpec,
+  parseRequestText,
+  isSafeRevision,
+  isSafeShowPath,
+  splitFencedBody,
+} from "../protocol.js";
 
 describe("parsePathSpec", () => {
   it("accepts a plain path without a range", () => {
@@ -107,10 +115,12 @@ describe("parseRequestText", () => {
     if (!r.ok) {
       assert.ok(r.reason.includes("unsupported operation `nope`"));
     }
+    // `@ctx patch` is now a supported write proposal; a missing body is
+    // refused as an empty proposal, not as an unknown operation.
     const b = parseRequestText("@ctx patch");
     assert.ok(!b.ok);
     if (!b.ok) {
-      assert.ok(b.reason.includes("unsupported operation `patch`"));
+      assert.ok(b.reason.includes("empty @ctx patch"));
     }
   });
 
@@ -461,5 +471,301 @@ describe("isSafeShowPath", () => {
     ]) {
       assert.equal(isSafeShowPath(path), false, `\`${path}\` must be refused`);
     }
+  });
+});
+
+describe("isSafeWritePath", () => {
+  it("accepts repository-relative paths including colons and percent signs", () => {
+    for (const path of ["src/app.ts", "docs/guide.md", "a/b/c.txt", "notes:meeting.md", "a%b"]) {
+      assert.equal(isSafeWritePath(path), true, `\`${path}\` should be safe`);
+    }
+  });
+
+  it("refuses absolute, traversal, and empty paths", () => {
+    for (const path of ["", "/etc/passwd", "C:\\Windows\\x", "../secret", "a/../b", "..", ".", "a/", "  "]) {
+      assert.equal(isSafeWritePath(path), false, `\`${path}\` must be refused`);
+    }
+  });
+});
+
+describe("splitFencedBody", () => {
+  it("extracts content between matching fences", () => {
+    const r = splitFencedBody(["```ts", "const a = 1;", "```", ""], "write");
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.content, "const a = 1;");
+    }
+  });
+
+  it("returns unfenced bodies raw with blank edges trimmed", () => {
+    const r = splitFencedBody(["", "  line one", "line two", ""], "patch");
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.content, "  line one\nline two");
+    }
+  });
+
+  it("refuses an unterminated fence", () => {
+    const r = splitFencedBody(["```", "content"], "write");
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("unterminated fenced block"));
+    }
+  });
+
+  it("refuses content after the closing fence", () => {
+    const r = splitFencedBody(["```", "content", "```", "trailing"], "patch");
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("unexpected content after the closing fence"));
+    }
+  });
+});
+
+describe("write proposal parsing", () => {
+  it("parses a standalone @ctx patch with a raw unified diff body", () => {
+    const r = parseRequestText(
+      [
+        "@ctx patch",
+        "diff --git a/src/app.ts b/src/app.ts",
+        "index 111..222 100644",
+        "--- a/src/app.ts",
+        "+++ b/src/app.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+      ].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.batch, false);
+      assert.equal(r.sequence, false);
+      assert.equal(r.ops.length, 1);
+      const op = r.ops[0]!;
+      assert.equal(op.kind, "patch");
+      if (op.kind === "patch") {
+        assert.ok(op.diff.includes("--- a/src/app.ts"));
+        assert.ok(op.diff.endsWith("\n"));
+      }
+    }
+  });
+
+  it("parses a fenced @ctx patch body and drops the language tag", () => {
+    const r = parseRequestText(
+      [
+        "@ctx patch",
+        "```diff",
+        "--- a/src/app.ts",
+        "+++ b/src/app.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "```",
+      ].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      const op = r.ops[0]!;
+      assert.equal(op.kind, "patch");
+      if (op.kind === "patch") {
+        assert.ok(!op.diff.includes("```"));
+        assert.ok(op.diff.includes("+new"));
+      }
+    }
+  });
+
+  it("parses a fenced @ctx write with full-file content", () => {
+    const r = parseRequestText(
+      [
+        "@ctx write src/new.ts",
+        "```ts",
+        "export const x = 1;",
+        "",
+        "export function y() { return x; }",
+        "```",
+      ].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      const op = r.ops[0]!;
+      assert.equal(op.kind, "write");
+      if (op.kind === "write") {
+        assert.equal(op.path, "src/new.ts");
+        assert.equal(op.content, "export const x = 1;\n\nexport function y() { return x; }");
+      }
+    }
+  });
+
+  it("parses a @ctx sequence with a write proposal and verification reads", () => {
+    const r = parseRequestText(
+      [
+        "@ctx sequence",
+        "@ctx patch",
+        "--- a/src/app.ts",
+        "+++ b/src/app.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "@ctx status",
+        "@ctx file src/app.ts",
+      ].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.sequence, true);
+      assert.equal(r.ops.length, 1);
+      const op = r.ops[0]!;
+      assert.equal(op.kind, "sequence");
+      if (op.kind === "sequence") {
+        assert.equal(op.write.kind, "patch");
+        assert.deepEqual(
+          op.verify.map((v) => v.kind),
+          ["status", "file"],
+        );
+      }
+    }
+  });
+
+  it("keeps @ctx-looking lines inside a fenced body as content", () => {
+    const r = parseRequestText(
+      ["chat before", "@ctx write docs.md", "```md", "# Title", "@ctx not a request", "```"].join("\n"),
+    );
+    assert.ok(r.ok);
+    if (r.ok) {
+      const op = r.ops[0]!;
+      assert.equal(op.kind, "write");
+      if (op.kind === "write") {
+        assert.ok(op.content.includes("@ctx not a request"));
+      }
+    }
+  });
+
+  it("refuses a write body with an unterminated fence", () => {
+    const r = parseRequestText(["@ctx write a.ts", "```", "content"].join("\n"));
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("unterminated fenced block"));
+    }
+  });
+
+  it("refuses an empty patch body and an empty write body", () => {
+    const patch = parseRequestText("@ctx patch");
+    assert.ok(!patch.ok);
+    if (!patch.ok) {
+      assert.ok(patch.reason.includes("empty @ctx patch"));
+    }
+    const write = parseRequestText(["@ctx write a.ts", "@ctx status"].join("\n"));
+    assert.ok(!write.ok);
+    if (!write.ok) {
+      assert.ok(write.reason.includes("empty @ctx write"));
+    }
+  });
+
+  it("refuses a write with an unsafe path", () => {
+    const r = parseRequestText(["@ctx write ../escape.ts", "```", "x", "```"].join("\n"));
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("unsafe write path"));
+    }
+  });
+
+  it("refuses write proposals inside a batch", () => {
+    const r = parseRequestText(
+      ["@ctx batch", "@ctx patch", "--- a/x", "+++ b/x", "@ctx status"].join("\n"),
+    );
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("cannot be a `@ctx batch` member"));
+    }
+  });
+
+  it("refuses mixing a write proposal with read operations", () => {
+    const r = parseRequestText(
+      ["@ctx status", "@ctx patch", "--- a/x", "+++ b/x", "@@ -1 +1 @@", "-a", "+b"].join("\n"),
+    );
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("must be the only operation"));
+    }
+  });
+
+  it("refuses a sequence that does not start with a write proposal", () => {
+    const r = parseRequestText(["@ctx sequence", "@ctx status"].join("\n"));
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("must start with"));
+    }
+  });
+
+  it("refuses a sequence without verification reads", () => {
+    const r = parseRequestText(["@ctx sequence", "@ctx patch", "--- a/x", "+++ b/x"].join("\n"));
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("at least one verification read"));
+    }
+  });
+
+  it("refuses a sequence with two write proposals", () => {
+    const r = parseRequestText(
+      [
+        "@ctx sequence",
+        "@ctx write a.ts",
+        "```",
+        "content",
+        "```",
+        "@ctx write b.ts",
+        "```",
+        "content",
+        "```",
+        "@ctx status",
+      ].join("\n"),
+    );
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.ok(r.reason.includes("exactly one write proposal"));
+    }
+  });
+});
+
+describe("extractDiffTargets", () => {
+  it("extracts targets with their change kinds", () => {
+    const diff = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "index 111..222 100644",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "diff --git a/src/new.ts b/src/new.ts",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/src/new.ts",
+      "@@ -0,0 +1 @@",
+      "+fresh",
+      "diff --git a/src/gone.ts b/src/gone.ts",
+      "deleted file mode 100644",
+      "--- a/src/gone.ts",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-gone",
+    ].join("\n");
+    assert.deepEqual(extractDiffTargets(diff), [
+      { relPath: "src/a.ts", kind: "modified" },
+      { relPath: "src/new.ts", kind: "new file" },
+      { relPath: "src/gone.ts", kind: "deleted" },
+    ]);
+  });
+
+  it("tracks renames and dedupes duplicate targets", () => {
+    const diff = [
+      "diff --git a/old.ts b/new.ts",
+      "similarity index 100%",
+      "rename from old.ts",
+      "rename to new.ts",
+      "--- a/old.ts",
+      "+++ b/new.ts",
+    ].join("\n");
+    assert.deepEqual(extractDiffTargets(diff), [{ relPath: "new.ts", kind: "renamed" }]);
   });
 });

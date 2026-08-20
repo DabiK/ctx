@@ -9,7 +9,7 @@
  * refusal happens before any content is read.
  */
 
-import { IGNORE_FILE_NAME } from "../branding.js";
+import { CONFIG_FILE_NAME, IGNORE_FILE_NAME } from "../branding.js";
 import type { ProjectConfig } from "../config.js";
 import { compileIgnorePatterns, type CompiledIgnore } from "../ignore.js";
 import { DEFAULT_SENSITIVE_PATTERNS } from "../sensitive.js";
@@ -76,6 +76,82 @@ export class PathGuard {
    */
   guardDir(relPath: string): GuardResult {
     return this.check(relPath, true);
+  }
+
+  /**
+   * Validate one repository-relative write target. Writes stay inside the
+   * repository root only (configured allowed roots stay read-only), never
+   * touch `.ctx.toml`/`.ctxignore` (the permission-boundary files), and
+   * honour the same ignore and sensitive rules as reads. The target may not
+   * exist yet: the deepest existing ancestor is resolved and must stay inside
+   * the root, so symlink escapes and broken links fail closed. Existing
+   * directories are refused (files only).
+   */
+  guardWrite(relPath: string): GuardResult {
+    const trimmed = relPath.trim();
+    if (trimmed === "") {
+      return { ok: false, kind: "refused", reason: "empty path" };
+    }
+    if (isAbsolutePath(trimmed)) {
+      return {
+        ok: false,
+        kind: "refused",
+        reason: "absolute paths are refused — use a repository-relative path",
+      };
+    }
+    const segments = trimmed.split(/[\\/]+/).filter((s) => s.length > 0 && s !== ".");
+    if (segments.some((s) => s === "..")) {
+      return { ok: false, kind: "refused", reason: "path traversal is refused" };
+    }
+    if (segments.length === 0) {
+      return { ok: false, kind: "refused", reason: "empty path" };
+    }
+    const rel = segments.join("/");
+    if (rel === CONFIG_FILE_NAME || rel === IGNORE_FILE_NAME) {
+      return {
+        ok: false,
+        kind: "refused",
+        reason:
+          `\`${rel}\` configures the context permission boundary — writes to it are refused`,
+      };
+    }
+    const entry = this.entryAllowed(rel);
+    if (!entry.ok) {
+      return { ok: false, kind: "refused", reason: entry.reason };
+    }
+
+    const rootResolved = this.fs.realpath(this.root) ?? this.fs.resolve(this.root);
+    const absPath = this.fs.join(this.root, ...segments);
+
+    // Resolve the deepest existing ancestor and require it inside the
+    // repository root; the (possibly empty) remaining tail is created.
+    for (let i = segments.length; i >= 0; i--) {
+      const probeRel = segments.slice(0, i).join("/");
+      const probe = probeRel === "" ? this.root : this.fs.join(this.root, probeRel);
+      if (!this.fs.exists(probe)) {
+        continue;
+      }
+      const resolved = this.fs.realpath(probe);
+      if (resolved === null) {
+        return {
+          ok: false,
+          kind: "refused",
+          reason: "write target cannot be resolved (broken symlink?)",
+        };
+      }
+      if (!this.fs.isWithin(rootResolved, resolved)) {
+        return {
+          ok: false,
+          kind: "refused",
+          reason: "write target resolves outside the repository root",
+        };
+      }
+      if (i === segments.length && this.fs.isDirectory(probe)) {
+        return { ok: false, kind: "refused", reason: "is a directory — files only" };
+      }
+      break;
+    }
+    return { ok: true, kind: "ok", absPath, relPath: rel };
   }
 
   /**

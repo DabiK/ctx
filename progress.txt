@@ -172,3 +172,62 @@
   round trip, per-file omission with explanation, total-budget recovery
   (combined and single-op `--copy`), and batch nesting/empty/argument refusals.
 
+## 2026-08-20 — #7 Controlled writes and sequences
+
+- Added the first controlled repository modification from tagged LLM proposals:
+  `@ctx patch` (one multi-file unified diff body), `@ctx write <path>` (a
+  fenced or raw full-file body), and `@ctx sequence` (one write proposal
+  followed by verification reads that run only after the write). `ctx read`
+  validates and preflights a proposal and copies a preview — nothing changes;
+  the new explicit `ctx apply` command is the approval that applies it.
+- Protocol parser: proposal bodies span multiple lines until the next `@ctx`
+  line; ```/~~~ fenced bodies close before it (language tags dropped, content
+  after the closing fence refused, unterminated fences refused); @ctx-looking
+  lines inside an open fence stay content; leading whitespace before `@ctx`
+  stays tolerated. A proposal must be the only operation of the request (or a
+  sequence's first member); proposals are refused inside `batch`, as are
+  mixed read+proposal requests, sequences that do not start with a write,
+  sequences without verification reads, and sequences with two writes. Pure
+  helpers: `splitFencedBody`, `extractDiffTargets` (a/ b/ prefixes stripped,
+  change kinds new/deleted/renamed/modified, dedupe), `isSafeWritePath`.
+- Write boundary: `PathGuard.guardWrite` validates write targets
+  repository-relative, inside the repository ROOT only (configured
+  allowed_roots stay read-only), honours `.ctxignore` and sensitive-path rules,
+  refuses the `.ctx.toml`/`.ctxignore` permission-boundary files, refuses
+  existing directory targets, and resolves the deepest existing ancestor so
+  symlink escapes and broken links fail closed. Sensitive write content is
+  refused without an explicit override: full bodies via
+  `containsSensitiveContent`, patches via the new `diffAddsSensitiveContent`
+  (added lines only, so key-removal cleanup diffs pass).
+- Ports/adapters: `GitPort` gained `checkPatch` (`git apply --check`) and
+  `applyPatch` (`git apply`, Git as the recovery path), implemented in
+  `SystemGit` by feeding the patch through stdin (`spawn`, never written to
+  disk); `FsPort` gained `mkdirs` (SystemFs recursive mkdir) for creating
+  missing parent directories of accepted full writes. The CLI adapter wires the
+  new `apply` command (no args, `--allow-sensitive`).
+- `WriteUseCase` (application layer): validates proposals, preflights patches
+  before any change, applies patch/write, and runs sequence verification reads
+  only after the write succeeds (skipped with an explicit reason when the write
+  is refused or fails). Copied responses are structured `# CTX RESPONSE`
+  blocks: `## Patch proposal — ready to apply` / `## Patch applied` /
+  `## Sequence — write applied` with verification sections, or `## … refused`
+  with per-target reasons, preflight/apply diagnostics, and `No files
+  changed.`; an oversized verification response fails closed with an applied
+  note instead of silently truncating.
+- Shared operation execution extracted into `OpCollector`
+  (`src/application/collect.ts`) so combined requests, batches, and sequence
+  verification reads render identical sections through the same boundary.
+- Protocol prompt (full + compact) now says `ctx read` validates/preflights
+  proposals and `ctx apply` is the approval step.
+- Tests: protocol parsing (proposal bodies, fences, mixing/nesting refusals,
+  diff targets), `guardWrite` boundary suite, `WriteUseCase` unit tests with
+  fakes (preview without change, sensitive/ignored/boundary refusals,
+  apply success/failure, sequence conditional behavior, apply-with-no-proposal),
+  CLI `apply` command, and real-temporary-Git-repository integration (multi-file
+  patch preview/apply, patch failure, new-file patches via `git add -N`, full
+  writes with parent dirs, sensitive-write refusal, sequence verification
+  order, non-repository failure). 275 tests pass; typecheck clean. Verified the
+  packaged CLI manually on macOS: patch preview (no change), `ctx apply`,
+  full-write preview/apply, sequence apply with verification reads, and
+  sensitive/traversal refusals.
+

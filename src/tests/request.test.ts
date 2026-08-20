@@ -73,7 +73,7 @@ describe("RequestUseCase.read", () => {
     const copied = clipboard.lastCopied() ?? "";
     assert.ok(copied.includes("## Request refused"));
     assert.ok(copied.includes("unsupported operation `explode`"));
-    assert.ok(copied.includes("batch (a block of @ctx operations)"));
+    assert.ok(copied.includes("batch (a block of @ctx read operations)"));
   });
 
   it("reports when the clipboard contains no @ctx request", async () => {

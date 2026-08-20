@@ -17,7 +17,8 @@
 
 import { CONFIG_FILE_NAME, PRODUCT_NAME } from "../branding.js";
 import { clampBatchBytes, clampFileBytes, parseProjectConfig } from "../config.js";
-import { parseRequestText, SUPPORTED_OPS, type RequestOp } from "../protocol.js";
+import { parseRequestText, SUPPORTED_OPS, isReadOp, type ReadOp } from "../protocol.js";
+import { createCollector } from "./collect.js";
 import {
   EXIT_FAILURE,
   EXIT_OK,
@@ -25,8 +26,6 @@ import {
   requireGitRoot,
   utf8ByteLength,
 } from "./common.js";
-import { DiscoveryUseCase, type OpExecution } from "./discovery.js";
-import { GitUseCase } from "./git.js";
 import type {
   ClipboardPort,
   FsPort,
@@ -34,16 +33,14 @@ import type {
   SearchPort,
   TerminalPort,
 } from "./ports.js";
-import { ReadUseCase } from "./read.js";
 import {
   buildBatchResponse,
   buildCombinedResponse,
-  buildReadPart,
   buildRecoveryResponse,
   buildRefusalResponse,
   type ResponsePart,
 } from "./response.js";
-import { SearchUseCase } from "./search.js";
+import { WriteUseCase } from "./write.js";
 
 export interface RequestOptions {
   allowSensitive: boolean;
@@ -60,10 +57,8 @@ interface RequestBudget {
 }
 
 export class RequestUseCase {
-  private readonly reader: ReadUseCase;
-  private readonly discovery: DiscoveryUseCase;
-  private readonly search: SearchUseCase;
-  private readonly gitOps: GitUseCase;
+  private readonly collector: ReturnType<typeof createCollector>;
+  private readonly writes: WriteUseCase;
 
   constructor(
     private readonly clipboard: ClipboardPort,
@@ -72,10 +67,8 @@ export class RequestUseCase {
     private readonly fs: FsPort,
     search: SearchPort,
   ) {
-    this.reader = new ReadUseCase(clipboard, terminal, git, fs);
-    this.discovery = new DiscoveryUseCase(clipboard, terminal, git, fs);
-    this.search = new SearchUseCase(clipboard, terminal, git, fs, search);
-    this.gitOps = new GitUseCase(clipboard, terminal, git, fs);
+    this.collector = createCollector(clipboard, terminal, git, fs, search);
+    this.writes = new WriteUseCase(clipboard, terminal, git, fs, search);
   }
 
   async read(opts: RequestOptions): Promise<number> {
@@ -103,6 +96,17 @@ export class RequestUseCase {
       return EXIT_FAILURE;
     }
 
+    // A tagged write proposal (patch, write, or sequence) is validated and
+    // preflighted here without changing anything; applying happens through the
+    // explicit `ctx apply` command while the proposal stays in the clipboard.
+    if (
+      parsed.sequence ||
+      (parsed.ops.length === 1 &&
+        (parsed.ops[0]?.kind === "patch" || parsed.ops[0]?.kind === "write"))
+    ) {
+      return this.writes.preview(parsed, opts.allowSensitive);
+    }
+
     const config = parseProjectConfig(this.fs.readText(this.fs.join(root, CONFIG_FILE_NAME)));
     const budget: RequestBudget = {
       maxBatchBytes: clampBatchBytes(config.maxBatchBytes),
@@ -114,19 +118,19 @@ export class RequestUseCase {
     // read response (byte-identical to `ctx files --copy`).
     if (!parsed.batch && parsed.ops.every((op) => op.kind === "file" || op.kind === "files")) {
       const specs = parsed.ops.flatMap((op) => op.specs);
-      return this.reader.files(specs, {
+      return this.collector.reader.files(specs, {
         copy: true,
         allowSensitive: opts.allowSensitive,
         protocol: true,
       });
     }
 
-    return this.executeCombined(parsed.ops, opts, budget);
+    return this.executeCombined(parsed.ops.filter(isReadOp), opts, budget);
   }
 
   /** Execute a mixed or batch request into one response copied to the clipboard. */
   private async executeCombined(
-    ops: RequestOp[],
+    ops: ReadOp[],
     opts: RequestOptions,
     budget: RequestBudget,
   ): Promise<number> {
@@ -135,51 +139,7 @@ export class RequestUseCase {
     let produced = false;
 
     for (const op of ops) {
-      let exec: OpExecution | null = null;
-      switch (op.kind) {
-        case "file":
-        case "files": {
-          const collected = await this.reader.collectSpecs(op.specs, opts.allowSensitive);
-          if (collected !== null) {
-            const items = collected.items;
-            const readCount = items.filter((i) => i.kind === "read").length;
-            exec = {
-              part: buildReadPart(items, op.kind === "file" ? `file ${op.specs[0] ?? ""}` : `files ${op.specs.join(" ")}`),
-              produced: readCount > 0,
-              maxBatchBytes: collected.maxBatchBytes,
-            };
-          }
-          break;
-        }
-        case "tree":
-          exec = await this.discovery.collectTree(op.depth, opts.allowSensitive);
-          break;
-        case "glob":
-          exec = await this.discovery.collectGlob(op.pattern, opts.allowSensitive, null);
-          break;
-        case "inspect":
-          exec = await this.discovery.collectInspect(op.path, opts.allowSensitive, null);
-          break;
-        case "search":
-          exec = await this.search.collectSearch(op.query, opts.allowSensitive, null);
-          break;
-        case "status":
-          exec = await this.gitOps.collectStatus(opts.allowSensitive);
-          break;
-        case "changed":
-          exec = await this.gitOps.collectChanged(op.path, opts.allowSensitive);
-          break;
-        case "diff":
-          exec = await this.gitOps.collectDiff(op.path, op.staged, opts.allowSensitive);
-          break;
-        case "log":
-          exec = await this.gitOps.collectLog(op.path, opts.allowSensitive, op.limit);
-          break;
-        case "show":
-          exec = await this.gitOps.collectShow(op.rev, op.path, opts.allowSensitive);
-          break;
-      }
-
+      const exec = await this.collector.collect(op, opts.allowSensitive);
       if (exec === null) {
         // Infrastructure failure (already reported to the terminal).
         return EXIT_FAILURE;

@@ -205,6 +205,30 @@ Coche la case quand la tâche est terminée. Une seule tâche par itération Ral
   > - #8 Watcher TUI safe and auto.
   >
 
+- [ ] #11 — OpenTUI watcher interface (labels: ready-for-agent)
+
+  **Issue #11 — détail complet**
+  > ## Parent
+  >
+  > Implements part of #1.
+  >
+  > ## What to build
+  >
+  > Replace the hand-rendered watcher terminal interface with a polished, keyboard-operable OpenTUI interface. Preserve the watcher, clipboard, write, security, and application-use-case behaviour: this is a platform rendering-adapter migration, not a workflow rewrite. The interface must make mode, recent activity, pending proposal, preview, yolo countdown, and available actions immediately legible on macOS and Windows terminals.
+  >
+  > ## Acceptance criteria
+  >
+  > - [ ] `ctx watch` renders through OpenTUI with a responsive full-screen layout: clear status/mode header, recent activity, pending write state, and persistent keyboard-help area.
+  > - [ ] Safe, auto, and persisted yolo mode are visually distinct; a yolo countdown is visible and cancellation remains obvious.
+  > - [ ] Pending patch/write previews are readable without losing the proposal or its target summary.
+  > - [ ] All existing keyboard actions remain operable and their focus/selection state is visible.
+  > - [ ] The application layer and watcher policy remain independent of OpenTUI; OpenTUI stays in a replaceable platform adapter.
+  > - [ ] Tests preserve deterministic watcher behaviour through the existing TUI port/fake, and a manual smoke path documents rendering on macOS and Windows.
+  >
+  > ## Blocked by
+  >
+  > - #9 Yolo user mode and notifications.
+  >
 - [ ] #10 — Package, cross-platform CI and E2E (labels: ready-for-agent)
 
   **Issue #10 — détail complet**

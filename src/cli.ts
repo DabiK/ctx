@@ -27,9 +27,11 @@ import { SystemClock } from "./platform/clock.js";
 import { SystemEnv } from "./platform/env.js";
 import { SystemFs } from "./platform/fs.js";
 import { SystemGit } from "./platform/git.js";
+import { SystemNotifications } from "./platform/notifications.js";
 import { createSearchPort } from "./platform/search.js";
 import { SystemTerminal } from "./platform/terminal.js";
 import { SystemTui } from "./platform/tui.js";
+import { SystemUserConfig } from "./platform/user-config.js";
 
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
@@ -92,7 +94,7 @@ function usage(): string {
     `  show      Print one file's content at a revision (git show rev:path).`,
     `  read      Execute the @ctx request in the clipboard and copy the response back.`,
     `  apply     Apply the tagged patch/write/sequence proposal in the clipboard.`,
-    `  watch     Foreground clipboard watcher TUI (safe/auto modes).`,
+    `  watch     Foreground clipboard watcher TUI (safe/auto/yolo modes).`,
     `  help      Show this help.`,
     ``,
     `Options:`,
@@ -321,11 +323,19 @@ function commandHelp(command: Command): string {
         `content (loop prevention), and surfaces tagged @ctx patch/write/sequence`,
         `proposals as pending writes for an explicit action.`,
         ``,
-        `Keys: m toggle mode (safe/auto), e command entry, a apply pending write,`,
+        `Keys: m cycle mode (safe/auto/yolo), e command entry, a apply pending write,`,
         `c cancel pending write, p preview pending write, q quit.`,
         ``,
         `Safe mode confirms read requests and proposed writes; auto mode runs`,
         `valid reads automatically but keeps writes awaiting an explicit action.`,
+        `Yolo mode runs valid reads automatically and auto-applies valid`,
+        `non-sensitive write proposals after a cancellable three-second`,
+        `countdown; sensitive writes stay blocked without --allow-sensitive. The`,
+        `selected mode is persisted in your user-local configuration (outside the`,
+        `repository) and restored by later sessions. Optional desktop`,
+        `notifications report request completion and pending/applied write events`,
+        `without replacing TUI diagnostics.`,
+        ``,
         `The command entry executes supported read operations and copies their`,
         `structured response.`,
         ``,
@@ -625,8 +635,18 @@ export async function runCli(argv: string[], ports: PlatformPorts): Promise<numb
       });
     }
     case "watch": {
-      const { clipboard, terminal, git, fs, search, tui, clock } = ports;
-      return new WatchUseCase(clipboard, terminal, git, fs, search, tui, clock).watch({
+      const { clipboard, terminal, git, fs, search, tui, clock, userConfig, notifications } = ports;
+      return new WatchUseCase(
+        clipboard,
+        terminal,
+        git,
+        fs,
+        search,
+        tui,
+        clock,
+        userConfig,
+        notifications,
+      ).watch({
         allowSensitive: parsed.allowSensitive,
       });
     }
@@ -670,6 +690,8 @@ export async function main(argv: string[]): Promise<number> {
     search: createSearchPort(env),
     tui: new SystemTui(),
     clock: new SystemClock(),
+    userConfig: new SystemUserConfig(),
+    notifications: new SystemNotifications(env.platform),
   };
   return runCli(argv, ports);
 }

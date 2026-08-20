@@ -45,6 +45,11 @@ export class SystemTui implements TuiPort {
   render(view: WatcherView): void {
     const lines: string[] = [];
     lines.push(`${view.mode.toUpperCase()} mode — clipboard watcher`);
+    if (view.countdown !== null) {
+      lines.push(
+        `  >> Applying ${view.countdown.label} in ${view.countdown.secondsLeft}s — press any key to cancel`,
+      );
+    }
     lines.push("");
 
     lines.push("Recent events:");

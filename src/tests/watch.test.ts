@@ -1,8 +1,10 @@
 /**
  * Watcher/TUI tests: the `ctx watch` loop with fake clipboard, clock, and TUI
- * ports. Covers loop prevention (own responses and duplicate hashes), safe and
- * auto mode behavior, mode transitions, the command entry, pending-write
- * surfacing, preview, application, cancellation, and quit.
+ * ports. Covers loop prevention (own responses and duplicate hashes), safe,
+ * auto, and yolo mode behavior, persisted-mode restore, the yolo countdown
+ * (completion and cancellation), sensitive-write refusal in yolo, the command
+ * entry, pending-write surfacing, preview, application, cancellation,
+ * notifications, and quit.
  */
 
 import assert from "node:assert/strict";
@@ -22,8 +24,18 @@ function seedRepo(fs: FakeFs): void {
 
 /** Build a WatchUseCase from a fake port bundle. */
 function makeWatch(ports: ReturnType<typeof fakePorts>["ports"]): WatchUseCase {
-  const { clipboard, terminal, git, fs, search, tui, clock } = ports;
-  return new WatchUseCase(clipboard, terminal, git, fs, search, tui, clock);
+  const { clipboard, terminal, git, fs, search, tui, clock, userConfig, notifications } = ports;
+  return new WatchUseCase(
+    clipboard,
+    terminal,
+    git,
+    fs,
+    search,
+    tui,
+    clock,
+    userConfig,
+    notifications,
+  );
 }
 
 /** Seed a fake status (branch + changed files). */
@@ -184,7 +196,7 @@ describe("WatchUseCase.watch", () => {
   });
 
   it("surfaces a write proposal as pending without copying over it", async () => {
-    const { ports, clipboard, tui } = fakePorts();
+    const { ports, clipboard, tui, notifications } = fakePorts();
     clipboard.content = [
       "@ctx write src/new.ts",
       "```",
@@ -202,6 +214,10 @@ describe("WatchUseCase.watch", () => {
     assert.equal(view.pendingWrites[0]?.label, "Write proposal");
     assert.deepEqual(view.pendingWrites[0]?.targets, ["src/new.ts"]);
     assert.ok(view.events.some((e) => e.text.includes("surfaced")));
+    assert.ok(
+      notifications.notices.some((n) => n.title === "Write proposal pending"),
+      "a pending-write notification was emitted",
+    );
   });
 
   it("shows the pending-write preview on the preview action", async () => {
@@ -223,7 +239,7 @@ describe("WatchUseCase.watch", () => {
   });
 
   it("applies a pending write in auto mode with the explicit apply action", async () => {
-    const { ports, clipboard, fs, tui } = fakePorts();
+    const { ports, clipboard, fs, tui, notifications } = fakePorts();
     clipboard.content = [
       "@ctx write src/new.ts",
       "```",
@@ -240,6 +256,10 @@ describe("WatchUseCase.watch", () => {
     assert.ok(copied.includes("## Write applied"));
     assert.equal(tui.lastView().pendingWrites.length, 0, "applied writes leave the pending queue");
     assert.ok(tui.lastView().events.some((e) => e.text.includes("applied")));
+    assert.ok(
+      notifications.notices.some((n) => n.title === "Write proposal applied"),
+      "an applied-write notification was emitted",
+    );
   });
 
   it("confirms proposed writes and their application in safe mode", async () => {
@@ -323,13 +343,14 @@ describe("WatchUseCase.watch", () => {
 
   it("reflects mode transitions in the rendered view", async () => {
     const { ports, tui } = fakePorts();
-    tui.keys = ["m", "m", "q"];
+    tui.keys = ["m", "m", "m", "q"];
 
     const code = await makeWatch(ports).watch({ allowSensitive: false });
 
     assert.equal(code, EXIT_OK);
-    assert.equal(tui.lastView().mode, "safe", "two toggles return to safe");
+    assert.equal(tui.lastView().mode, "safe", "a full cycle returns to safe");
     assert.ok(tui.rendered.some((v) => v.mode === "auto"));
+    assert.ok(tui.rendered.some((v) => v.mode === "yolo"));
   });
 
   it("keeps events timestamped with the clock port", async () => {
@@ -343,5 +364,132 @@ describe("WatchUseCase.watch", () => {
     for (const event of tui.lastView().events) {
       assert.equal(event.at, 100);
     }
+  });
+
+  it("restores the persisted mode from user-local config on start", async () => {
+    const { ports, clipboard, fs, userConfig, tui } = fakePorts();
+    seedRepo(fs);
+    userConfig.mode = "auto";
+    clipboard.content = "@ctx file src/app.ts";
+    // Auto mode runs the read without a confirmation prompt.
+    tui.keys = [null, "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(tui.lastView().mode, "auto");
+    assert.ok((clipboard.lastCopied() ?? "").includes("## src/app.ts"));
+  });
+
+  it("persists every mode switch to user-local config through a full cycle", async () => {
+    const { ports, userConfig, tui } = fakePorts();
+    tui.keys = ["m", "m", "m", "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(tui.lastView().mode, "safe", "a full cycle returns to safe");
+    assert.equal(userConfig.mode, "safe", "the final mode is persisted");
+    assert.ok(tui.rendered.some((v) => v.mode === "auto"));
+    assert.ok(tui.rendered.some((v) => v.mode === "yolo"));
+  });
+
+  it("counts down three seconds and auto-applies a valid write in yolo", async () => {
+    const { ports, clipboard, fs, tui, userConfig, notifications } = fakePorts();
+    userConfig.mode = "yolo";
+    clipboard.content = [
+      "@ctx write src/new.ts",
+      "```",
+      "hello yolo",
+      "```",
+    ].join("\n");
+    // Poll tick + 3 countdown ticks + quit: the countdown completes untouched.
+    tui.keys = [null, null, null, null, "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(fs.readText(`${ROOT}/src/new.ts`), "hello yolo");
+    const countdownSteps = tui.rendered
+      .flatMap((v) => (v.countdown !== null ? [v.countdown.secondsLeft] : []));
+    assert.deepEqual(countdownSteps, [3, 2, 1], "the countdown rendered every second");
+    assert.equal(tui.lastView().countdown, null, "the countdown clears after the apply");
+    assert.ok(tui.lastView().events.some((e) => e.text.includes("Write proposal applied")));
+    assert.ok(notifications.notices.some((n) => n.title === "Write proposal applied"));
+  });
+
+  it("cancels the yolo countdown on any key and keeps the proposal pending", async () => {
+    const { ports, clipboard, fs, tui, userConfig } = fakePorts();
+    userConfig.mode = "yolo";
+    clipboard.content = [
+      "@ctx write src/new.ts",
+      "```",
+      "hello yolo",
+      "```",
+    ].join("\n");
+    // Poll tick + 2 countdown ticks; the `c` key during the countdown cancels.
+    tui.keys = [null, null, "c", "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(fs.readText(`${ROOT}/src/new.ts`), null, "a cancelled write is never applied");
+    assert.equal(tui.lastView().pendingWrites.length, 1, "the cancelled proposal stays pending");
+    assert.ok(tui.lastView().events.some((e) => e.text.includes("countdown cancelled")));
+  });
+
+  it("never auto-applies a sensitive write in yolo without the override", async () => {
+    const { ports, clipboard, fs, tui, userConfig, notifications } = fakePorts();
+    userConfig.mode = "yolo";
+    clipboard.content = [
+      "@ctx write .env",
+      "```",
+      "AKIA1234567890123456",
+      "```",
+    ].join("\n");
+    // Enough ticks for a countdown to complete if it were started.
+    tui.keys = [null, null, null, null, "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(fs.readText(`${ROOT}/.env`), null, "sensitive writes stay blocked in yolo");
+    assert.equal(tui.lastView().pendingWrites.length, 1, "the refusal is surfaced as pending");
+    assert.ok(tui.lastView().events.some((e) => e.text.includes("refused in yolo")));
+    assert.ok(notifications.notices.some((n) => n.title === "Write proposal refused"));
+  });
+
+  it("auto-applies a sensitive write in yolo with the explicit override", async () => {
+    const { ports, clipboard, fs, tui, userConfig } = fakePorts();
+    userConfig.mode = "yolo";
+    clipboard.content = [
+      "@ctx write .env",
+      "```",
+      "AKIA1234567890123456",
+      "```",
+    ].join("\n");
+    tui.keys = [null, null, null, null, "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: true });
+
+    assert.equal(code, EXIT_OK);
+    assert.equal(fs.readText(`${ROOT}/.env`), "AKIA1234567890123456");
+    assert.equal(tui.lastView().pendingWrites.length, 0);
+  });
+
+  it("reports read completion through the notification port without replacing TUI diagnostics", async () => {
+    const { ports, clipboard, fs, tui, notifications } = fakePorts();
+    seedRepo(fs);
+    clipboard.content = "@ctx file src/app.ts";
+    tui.keys = ["m", null, "q"];
+
+    const code = await makeWatch(ports).watch({ allowSensitive: false });
+
+    assert.equal(code, EXIT_OK);
+    const completed = notifications.notices.find((n) => n.title === "Request completed");
+    assert.ok(completed, "a completion notification was emitted");
+    assert.ok(completed?.body.includes("file src/app.ts"));
+    // Notifications never replace TUI diagnostics.
+    assert.ok(tui.lastView().events.some((e) => e.text.includes("processed request")));
   });
 });

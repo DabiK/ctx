@@ -287,3 +287,56 @@
   `# CTX RESPONSE` copied), own-response loop prevention, `ctx read` batch
   regression, and `ctx watch --help`.
 
+## 2026-08-20 — #9 Yolo user mode and notifications
+
+- Added the user-local persisted `yolo` mode and optional desktop
+  notifications, completing the fast interactive watcher workflow through the
+  same hexagonal boundary.
+- New application ports (`src/application/ports.ts`): `UserConfigPort`
+  (`readMode`/`writeMode`, storing the watcher mode outside the repository so
+  collaborators never inherit a personal automation preference) and
+  `NotificationPort` (`notify(title, body)`, optional desktop notices that
+  never replace TUI diagnostics). `WatchMode` is now `"safe" | "auto" | "yolo"`,
+  and `WatcherView` carries an active `countdown` (`{ label, secondsLeft }`).
+  Both new ports are wired into `PlatformPorts`/`main` and the `ctx watch`
+  CLI command.
+- Infrastructure adapters: `SystemUserConfig` (`src/platform/user-config.ts`,
+  JSON at `~/.config/ctx/config.json` on macOS/Linux, `%APPDATA%\ctx\config.json`
+  on Windows; missing/unreadable/corrupt storage yields `null` and writes are
+  best-effort) and `SystemNotifications` (`src/platform/notifications.ts`,
+  `osascript display notification` on macOS, PowerShell WinForms balloon on
+  Windows, no-op elsewhere; fire-and-forget, failures never crash the watcher).
+- Yolo mode: `m` now cycles safe → auto → yolo → safe and persists each switch
+  through `UserConfigPort`; the watcher restores the persisted mode on start
+  (defaulting to safe). Valid non-sensitive write proposals enter a cancellable
+  three-second countdown rendered one second at a time in the TUI (`runCountdown`),
+  then auto-apply through the shared `WriteUseCase.applyParsed` path; any key
+  during the countdown cancels the auto-apply and keeps the proposal pending.
+  Refused (sensitive without the override, or invalid) proposals are surfaced
+  as pending and never auto-apply; with `--allow-sensitive` the explicit
+  override lets them validate and count down like any other.
+- Notifications fire on request completion (`Request completed`, `Command
+  completed`), on pending surfacing (`<Label> pending`), on yolo refusal /
+  cancellation, and on every applied/refused/failed write outcome (`<Label>
+  applied` / `refused` / `failed`) — always in addition to the TUI event log.
+- SystemTui renders the active countdown line (`YOLO — applying <label> in
+  Ns — press any key to cancel`); the watch help documents the three modes, the
+  countdown, user-local persistence, and the optional notifications.
+- Tests: `FakeUserConfig` (in-memory persisted mode) and `FakeNotifications`
+  (recorded notices) added to `fakes.ts`; new watch suites cover persisted-mode
+  restore on start, full mode-cycle persistence, countdown completion (rendered
+  steps `[3, 2, 1]` then applied), countdown cancellation by any key (proposal
+  stays pending, nothing written), sensitive-write refusal in yolo without the
+  override (surfaced as pending, never auto-applied), sensitive write applied in
+  yolo with the explicit override, and notification-port behavior (completion,
+  pending, applied, refused) with fakes. 303 tests pass; typecheck clean.
+- Verified the packaged CLI manually on macOS in a real PTY against the real
+  system clipboard and user config: yolo mode restored from
+  `~/.config/ctx/config.json` on start, valid write proposal auto-applied after
+  the 3-second countdown (file created + `# CTX RESPONSE` copied), countdown
+  cancellation via a key press (file never written, proposal kept pending),
+  sensitive `.env` write refused in yolo after a would-be countdown window
+  (never written, refusal surfaced as pending), and the same write applied
+  under `--allow-sensitive`; the Windows PowerShell notification command and
+  the config file round trip were verified via the packaged adapter modules.
+

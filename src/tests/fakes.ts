@@ -15,12 +15,15 @@ import type {
   GitShowResult,
   GitStatus,
   GitStatusFile,
+  NotificationPort,
   PlatformPorts,
   SearchMatch,
   SearchPort,
   TerminalPort,
   TuiPort,
+  UserConfigPort,
   WatcherView,
+  WatchMode,
 } from "../application/ports.js";
 
 export class FakeClipboard implements ClipboardPort {
@@ -356,6 +359,28 @@ export class FakeClock implements ClockPort {
   }
 }
 
+/** In-memory user-local config: the persisted watcher mode. */
+export class FakeUserConfig implements UserConfigPort {
+  mode: WatchMode | null = null;
+
+  readMode(): WatchMode | null {
+    return this.mode;
+  }
+
+  writeMode(mode: WatchMode): void {
+    this.mode = mode;
+  }
+}
+
+/** Recording notification port: captures titles and bodies for assertions. */
+export class FakeNotifications implements NotificationPort {
+  notices: { title: string; body: string }[] = [];
+
+  notify(title: string, body: string): void {
+    this.notices.push({ title, body });
+  }
+}
+
 /**
  * Scripted TUI used by watcher tests. `keys` drives `nextKey` in order; when
  * exhausted it yields `q` (quit) so a test loop always terminates. `confirm`
@@ -412,6 +437,7 @@ export class FakeTui implements TuiPort {
       events: [],
       pendingWrites: [],
       latestResponse: null,
+      countdown: null,
       footer: "",
     };
   }
@@ -427,6 +453,8 @@ export function fakePorts(overrides: Partial<{
   search: FakeSearch;
   tui: FakeTui;
   clock: FakeClock;
+  userConfig: FakeUserConfig;
+  notifications: FakeNotifications;
 }> = {}): {
   ports: PlatformPorts;
   clipboard: FakeClipboard;
@@ -437,6 +465,8 @@ export function fakePorts(overrides: Partial<{
   search: FakeSearch;
   tui: FakeTui;
   clock: FakeClock;
+  userConfig: FakeUserConfig;
+  notifications: FakeNotifications;
 } {
   const clipboard = overrides.clipboard ?? new FakeClipboard();
   const terminal = overrides.terminal ?? new FakeTerminal();
@@ -446,8 +476,10 @@ export function fakePorts(overrides: Partial<{
   const search = overrides.search ?? new FakeSearch();
   const tui = overrides.tui ?? new FakeTui();
   const clock = overrides.clock ?? new FakeClock();
+  const userConfig = overrides.userConfig ?? new FakeUserConfig();
+  const notifications = overrides.notifications ?? new FakeNotifications();
   return {
-    ports: { clipboard, terminal, git, fs, env, search, tui, clock },
+    ports: { clipboard, terminal, git, fs, env, search, tui, clock, userConfig, notifications },
     clipboard,
     terminal,
     git,
@@ -456,5 +488,7 @@ export function fakePorts(overrides: Partial<{
     search,
     tui,
     clock,
+    userConfig,
+    notifications,
   };
 }

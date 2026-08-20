@@ -5,14 +5,21 @@
  * duplicate clipboard content (loop prevention), and surfaces tagged
  * patch/write proposals in the TUI for an explicit application action. In
  * safe mode every read request is confirmed; in auto mode valid reads run
- * automatically, but writes always wait for the explicit apply action. The
+ * automatically, but writes always wait for the explicit apply action; in
+ * yolo mode valid non-sensitive writes auto-apply after a cancellable
+ * three-second countdown. The selected mode is persisted in user-local
+ * configuration (outside the repository) and restored by later sessions. The
  * TUI command entry executes supported read operations and automatically
- * copies their structured response.
+ * copies their structured response; optional desktop notifications report
+ * request completion and pending/applied write events without replacing TUI
+ * diagnostics.
  *
  * The loop is driven exclusively through application ports: clipboard, git,
- * fs, search, terminal, the TUI port (rendering and keyboard input), and the
- * clock port (tick cadence and event timestamps). No Node or OS code lives
- * here — the real TUI and clock are infrastructure adapters.
+ * fs, search, terminal, the TUI port (rendering and keyboard input), the
+ * clock port (tick cadence and event timestamps), the user-config port
+ * (persisted mode), and the notification port (optional desktop notices). No
+ * Node or OS code lives here — the real TUI, clock, user config, and
+ * notifications are infrastructure adapters.
  */
 
 import { EXECUTABLE_NAME, PRODUCT_NAME, RESPONSE_MARKER, VERSION } from "../branding.js";
@@ -25,22 +32,26 @@ import {
   singleProposal,
   SUPPORTED_OPS,
   type ParsedOkRequest,
+  type Proposal,
 } from "../protocol.js";
 import { copyOrThrow, EXIT_FAILURE, EXIT_OK, fnv1a, requireGitRoot } from "./common.js";
 import { RequestUseCase } from "./request.js";
 import { buildRefusalResponse } from "./response.js";
-import { WriteUseCase } from "./write.js";
+import { WriteUseCase, type ApplyOutcome, type PreviewOutcome } from "./write.js";
 import type {
   ClockPort,
   ClipboardPort,
   FsPort,
   GitPort,
+  NotificationPort,
   PendingWrite,
   SearchPort,
   TerminalPort,
   TuiPort,
+  UserConfigPort,
   WatchEvent,
   WatchMode,
+  WatcherCountdown,
   WatcherView,
 } from "./ports.js";
 
@@ -51,9 +62,22 @@ export interface WatchOptions {
 /** Maximum number of recent events kept in the watcher view. */
 const MAX_EVENTS = 50;
 
+/** Yolo auto-apply countdown duration in seconds (cancellable). */
+const YOLO_COUNTDOWN_SECONDS = 3;
+
+/** Countdown tick cadence (ms): one rendered countdown step per second. */
+const COUNTDOWN_TICK_MS = 1000;
+
+/** Mode cycle order for the `m` key. */
+const MODES: readonly WatchMode[] = ["safe", "auto", "yolo"];
+
 /** Key hints shown in the TUI footer. */
 function footerHint(mode: WatchMode): string {
-  return `[m] mode (${mode})  [e] command  [a] apply pending  [c] cancel  [p] preview  [q] quit`;
+  const modeHint =
+    mode === "yolo"
+      ? `[m] mode (yolo: valid writes auto-apply after ${YOLO_COUNTDOWN_SECONDS}s)`
+      : `[m] mode (${mode})`;
+  return `${modeHint}  [e] command  [a] apply pending  [c] cancel  [p] preview  [q] quit`;
 }
 
 export class WatchUseCase {
@@ -66,6 +90,7 @@ export class WatchUseCase {
   private readonly events: WatchEvent[] = [];
   private readonly pendingWrites: PendingWrite[] = [];
   private latestResponse: string | null = null;
+  private countdown: WatcherCountdown | null = null;
   private allowSensitive = false;
 
   constructor(
@@ -76,6 +101,8 @@ export class WatchUseCase {
     search: SearchPort,
     private readonly tui: TuiPort,
     private readonly clock: ClockPort,
+    private readonly userConfig: UserConfigPort,
+    private readonly notifications: NotificationPort,
   ) {
     this.requests = new RequestUseCase(clipboard, terminal, git, fs, search);
     this.writes = new WriteUseCase(clipboard, terminal, git, fs, search);
@@ -84,13 +111,15 @@ export class WatchUseCase {
   /**
    * Run the watcher until the user quits. Refuses to start outside a Git
    * repository; every request and write stays inside the repository boundary
-   * enforced by the same application use cases as the direct commands.
+   * enforced by the same application use cases as the direct commands. The
+   * mode is restored from user-local configuration (defaulting to safe).
    */
   async watch(opts: WatchOptions): Promise<number> {
     const root = await requireGitRoot(this.git, this.fs, this.terminal);
     if (root === null) {
       return EXIT_FAILURE;
     }
+    this.mode = this.userConfig.readMode() ?? "safe";
     this.allowSensitive = opts.allowSensitive;
     this.tui.open();
     this.logEvent(`${PRODUCT_NAME} ${VERSION} watcher started — mode: ${this.mode}.`);
@@ -153,7 +182,10 @@ export class WatchUseCase {
     }
   }
 
-  /** A read request: confirm in safe mode, run automatically in auto mode. */
+  /**
+   * A read request: confirm in safe mode, run automatically in auto and yolo
+   * modes. Completed requests are reported through the notification port.
+   */
   private async handleReadRequest(parsed: ParsedOkRequest): Promise<void> {
     const label = this.describeRequest(parsed);
     if (this.mode === "safe") {
@@ -177,9 +209,16 @@ export class WatchUseCase {
     for (const line of outcome.infoLines) {
       this.logEvent(line);
     }
+    this.notify("Request completed", label);
   }
 
-  /** A write proposal: surface it as pending; safe mode confirms first. */
+  /**
+   * A write proposal. In safe mode it is confirmed before surfacing; in auto
+   * mode it is surfaced as pending; in yolo mode a valid non-sensitive
+   * proposal counts down three seconds and auto-applies, while a refused
+   * (sensitive without the override, or invalid) proposal is surfaced as
+   * pending and never auto-applies.
+   */
   private async handleProposal(parsed: ParsedOkRequest): Promise<void> {
     const proposal = singleProposal(parsed);
     if (proposal === null) {
@@ -188,6 +227,21 @@ export class WatchUseCase {
     const outcome = await this.writes.previewParsed(proposal, this.allowSensitive);
     if (outcome === null) {
       this.logEvent("Write proposal could not be validated — see the terminal for details.");
+      return;
+    }
+    if (this.mode === "yolo") {
+      if (outcome.status === "refused") {
+        // Sensitive writes stay blocked in yolo unless the explicit
+        // sensitive-write override is given (then the proposal validates and
+        // counts down like any other).
+        this.surfacePending(outcome, proposal);
+        this.logEvent(
+          `${outcome.label} refused in yolo — never auto-applies (press p to preview the refusal).`,
+        );
+        this.notify(`${outcome.label} refused`, "Sensitive or invalid proposal — not applied.");
+        return;
+      }
+      await this.applyYoloProposal(outcome, proposal);
       return;
     }
     if (this.mode === "safe") {
@@ -199,6 +253,34 @@ export class WatchUseCase {
         return;
       }
     }
+    this.surfacePending(outcome, proposal);
+    this.notify(
+      `${outcome.label} pending`,
+      outcome.targets.map((t) => t.relPath).join(", ") || "no targets",
+    );
+    this.logEvent(
+      outcome.status === "refused"
+        ? `${outcome.label} surfaced as pending (invalid — press p to preview the refusal).`
+        : `${outcome.label} surfaced — press a to apply, p to preview, c to cancel.`,
+    );
+  }
+
+  /** Yolo path: count down three seconds, then auto-apply (or stay pending on cancel). */
+  private async applyYoloProposal(outcome: PreviewOutcome, proposal: Proposal): Promise<void> {
+    const completed = await this.runCountdown(outcome.label);
+    if (!completed) {
+      this.surfacePending(outcome, proposal);
+      this.logEvent(
+        `${outcome.label} countdown cancelled — stays pending (press a to apply, c to cancel).`,
+      );
+      this.notify(`${outcome.label} cancelled`, "Countdown cancelled — the proposal stays pending.");
+      return;
+    }
+    await this.applyProposal(proposal, outcome.label);
+  }
+
+  /** Add a validated proposal to the pending-write queue. */
+  private surfacePending(outcome: PreviewOutcome, proposal: Proposal): void {
     this.pendingWrites.push({
       seq: this.nextSeq(),
       label: outcome.label,
@@ -207,14 +289,12 @@ export class WatchUseCase {
       previewText: outcome.response,
       proposal,
     });
-    this.logEvent(
-      outcome.status === "refused"
-        ? `${outcome.label} surfaced as pending (invalid — press p to preview the refusal).`
-        : `${outcome.label} surfaced — press a to apply, p to preview, c to cancel.`,
-    );
   }
 
-  /** The explicit apply action for the first pending write. */
+  /**
+   * The explicit apply action for the first pending write. Safe mode confirms
+   * the application; auto and yolo modes treat it as an explicit action.
+   */
   private async applyPendingWrite(): Promise<void> {
     const pending = this.pendingWrites[0];
     if (pending === undefined) {
@@ -230,22 +310,38 @@ export class WatchUseCase {
         return;
       }
     }
-    const outcome = await this.writes.applyParsed(pending.proposal, {
+    const outcome = await this.applyProposal(pending.proposal, pending.label);
+    if (outcome !== null) {
+      this.pendingWrites.shift();
+    }
+  }
+
+  /**
+   * Apply a proposal through the shared write path and report the outcome
+   * through the event log and the notification port. Returns `null` when the
+   * infrastructure failed (the proposal stays pending); otherwise the outcome
+   * (applied, refused, or failed) with the copied response.
+   */
+  private async applyProposal(proposal: Proposal, label: string): Promise<ApplyOutcome | null> {
+    const outcome = await this.writes.applyParsed(proposal, {
       allowSensitive: this.allowSensitive,
     });
     if (outcome === null) {
-      this.logEvent(`Apply failed — see the terminal for details; ${pending.label} stays pending.`);
-      return;
+      this.logEvent(`Apply failed — see the terminal for details; ${label} stays pending.`);
+      return null;
     }
     this.latestResponse = outcome.response;
-    this.pendingWrites.shift();
     if (outcome.status === "applied") {
-      this.logEvent(`${pending.label} applied — ${outcome.targets.length} file(s) changed; response copied.`);
+      this.logEvent(`${label} applied — ${outcome.targets.length} file(s) changed; response copied.`);
+      this.notify(`${label} applied`, `${outcome.targets.length} file(s) changed; ${RESPONSE_MARKER} copied.`);
     } else if (outcome.status === "refused") {
-      this.logEvent(`${pending.label} refused — nothing changed (refusal copied).`);
+      this.logEvent(`${label} refused — nothing changed (refusal copied).`);
+      this.notify(`${label} refused`, "Nothing changed (refusal copied).");
     } else {
-      this.logEvent(`${pending.label} failed — nothing changed (diagnostic copied).`);
+      this.logEvent(`${label} failed — nothing changed (diagnostic copied).`);
+      this.notify(`${label} failed`, "Nothing changed (diagnostic copied).");
     }
+    return outcome;
   }
 
   /** Cancel (remove) the first pending write without applying it. */
@@ -268,6 +364,25 @@ export class WatchUseCase {
     }
     await this.tui.showDetail(pending.previewText);
     this.logEvent(`Previewed ${pending.label} (press p again to re-show).`);
+  }
+
+  /**
+   * Yolo countdown: render the remaining whole seconds, one per tick, and
+   * resolve `true` when it completes untouched or `false` when the user
+   * presses any key (cancelled — the proposal is never auto-applied).
+   */
+  private async runCountdown(label: string): Promise<boolean> {
+    for (let remaining = YOLO_COUNTDOWN_SECONDS; remaining > 0; remaining--) {
+      this.countdown = { label, secondsLeft: remaining };
+      this.render();
+      const key = await this.tui.nextKey(COUNTDOWN_TICK_MS);
+      if (key !== null) {
+        this.countdown = null;
+        return false;
+      }
+    }
+    this.countdown = null;
+    return true;
   }
 
   /** The TUI command entry: run a supported read command and copy its response. */
@@ -303,6 +418,7 @@ export class WatchUseCase {
       this.logEvent(line);
     }
     this.logEvent(`Command executed: ${line} — response copied.`);
+    this.notify("Command completed", line);
   }
 
   private async handleKey(key: string): Promise<void> {
@@ -312,7 +428,9 @@ export class WatchUseCase {
       return;
     }
     if (k === "m") {
-      this.mode = this.mode === "safe" ? "auto" : "safe";
+      const index = MODES.indexOf(this.mode);
+      this.mode = MODES[(index + 1) % MODES.length] ?? "safe";
+      this.userConfig.writeMode(this.mode);
       this.logEvent(`Mode switched to ${this.mode} — ${this.modeDescription()}.`);
       return;
     }
@@ -340,9 +458,13 @@ export class WatchUseCase {
   }
 
   private modeDescription(): string {
-    return this.mode === "safe"
-      ? "reads and writes are confirmed"
-      : "valid reads run automatically, writes stay pending";
+    if (this.mode === "safe") {
+      return "reads and writes are confirmed";
+    }
+    if (this.mode === "auto") {
+      return "valid reads run automatically, writes stay pending";
+    }
+    return `valid reads run automatically; valid non-sensitive writes auto-apply after ${YOLO_COUNTDOWN_SECONDS}s`;
   }
 
   /** Render the current watcher state through the TUI port. */
@@ -352,9 +474,15 @@ export class WatchUseCase {
       events: this.events.slice(-MAX_EVENTS),
       pendingWrites: [...this.pendingWrites],
       latestResponse: this.latestResponse,
+      countdown: this.countdown,
       footer: footerHint(this.mode),
     };
     this.tui.render(view);
+  }
+
+  /** One optional desktop notification (never replaces TUI diagnostics). */
+  private notify(title: string, body: string): void {
+    this.notifications.notify(title, body);
   }
 
   /** Append one event and cap the log. */

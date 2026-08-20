@@ -8,11 +8,11 @@ Complete the fast interactive workflow. Add the user-local persisted `yolo` mode
 
 ## Acceptance criteria
 
-- [ ] The selected mode is persisted in user-local configuration, outside the repository, and restored by a later watcher session.
-- [ ] In yolo, valid non-sensitive patch and full-write proposals display a cancellable three-second countdown and apply only after it completes.
-- [ ] Sensitive writes remain blocked even in yolo unless the explicit sensitive-write override is provided.
-- [ ] Optional notifications report request completion and pending/applied write events without replacing TUI diagnostics.
-- [ ] Tests cover persisted mode restore, countdown completion/cancellation, sensitive-write refusal, and notification-port behavior with fakes.
+- [x] The selected mode is persisted in user-local configuration, outside the repository, and restored by a later watcher session.
+- [x] In yolo, valid non-sensitive patch and full-write proposals display a cancellable three-second countdown and apply only after it completes.
+- [x] Sensitive writes remain blocked even in yolo unless the explicit sensitive-write override is provided.
+- [x] Optional notifications report request completion and pending/applied write events without replacing TUI diagnostics.
+- [x] Tests cover persisted mode restore, countdown completion/cancellation, sensitive-write refusal, and notification-port behavior with fakes.
 
 ## Blocked by
 

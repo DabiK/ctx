@@ -195,6 +195,35 @@ export interface PlatformPorts {
   search: SearchPort;
   tui: TuiPort;
   clock: ClockPort;
+  userConfig: UserConfigPort;
+  notifications: NotificationPort;
+}
+
+/**
+ * User-local configuration: the watcher's selected mode, persisted outside the
+ * repository so collaborators never inherit a personal automation preference.
+ * The real adapter stores a small JSON file in the user's config directory;
+ * tests inject an in-memory fake.
+ */
+export interface UserConfigPort {
+  /**
+   * The persisted watcher mode, or `null` when nothing is stored (the
+   * application layer decides the default). Malformed or unreadable storage
+   * also yields `null` — a missing preference must never crash the watcher.
+   */
+  readMode(): WatchMode | null;
+  /** Persist the watcher mode outside the repository (best-effort). */
+  writeMode(mode: WatchMode): void;
+}
+
+/**
+ * Optional desktop notifications for the watcher. Reports request completion
+ * and pending/applied write events without replacing TUI diagnostics; a
+ * backend that is unavailable or fails must never crash the watcher.
+ */
+export interface NotificationPort {
+  /** Show one desktop notification (title + body), or do nothing when unsupported. */
+  notify(title: string, body: string): void;
 }
 
 /**
@@ -209,8 +238,12 @@ export interface ClockPort {
   pollIntervalMs(): number;
 }
 
-/** Current watcher mode: safe confirms actions, auto runs valid reads. */
-export type WatchMode = "safe" | "auto";
+/**
+ * Current watcher mode. `safe` confirms every action, `auto` runs valid reads
+ * automatically but keeps writes pending, and `yolo` also auto-applies valid
+ * non-sensitive write proposals after a cancellable three-second countdown.
+ */
+export type WatchMode = "safe" | "auto" | "yolo";
 
 /** One recent watcher event (newest last in the view). */
 export interface WatchEvent {
@@ -238,6 +271,14 @@ export interface PendingWrite {
   proposal: import("../protocol.js").Proposal;
 }
 
+/** An active yolo auto-apply countdown shown in the watcher view. */
+export interface WatcherCountdown {
+  /** Proposal label being counted down ("Write proposal", "Patch proposal"). */
+  label: string;
+  /** Whole seconds remaining before the proposal auto-applies. */
+  secondsLeft: number;
+}
+
 /** The state the watcher renders on every change. */
 export interface WatcherView {
   mode: WatchMode;
@@ -247,6 +288,8 @@ export interface WatcherView {
   pendingWrites: PendingWrite[];
   /** The latest `# CTX RESPONSE` block the watcher copied, or null. */
   latestResponse: string | null;
+  /** Active yolo countdown, or null when idle. */
+  countdown: WatcherCountdown | null;
   /** Footer hint line (key bindings, current mode). */
   footer: string;
 }

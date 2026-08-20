@@ -1,0 +1,24 @@
+# Progress
+
+## 2026-08-20 — #2 Bootstrap CLI, init, prompt and doctor
+
+- Refactored the flat bootstrap code into a strict hexagonal architecture.
+- Moved application ports to `src/application/ports.ts`; added `FsPort.join` so
+  platform path semantics live in the filesystem adapter.
+- Split the previous `AppService` god service into three independent
+  application use cases: `InitUseCase`, `PromptUseCase`, `DoctorUseCase`
+  (in `src/application/`). Shared helpers (`requireGitRoot`,
+  `buildClipboardPayload`, `copyPayload`, `report`, `utf8ByteLength`) live in
+  `src/application/common.ts`.
+- Removed all Node/OS imports from the application layer (`node:path`,
+  `Buffer`) — they are confined to `src/platform/` and the CLI inbound adapter.
+- CLI (`src/cli.ts`) now dispatches each command to its own use case; platform
+  adapters unchanged in behavior but import ports from `../application/ports.js`.
+- Build script now cleans `dist/` first (cross-platform) so stale compiled
+  files cannot leak into test runs.
+- Tests split per use case (`init.test.ts`, `prompt.test.ts`, `doctor.test.ts`,
+  `cli.test.ts`) invoking use cases through their public application
+  interfaces with fake platform ports. 30 tests pass.
+- Verified the packaged CLI on macOS: help/version, `init` (create + no
+  overwrite without `--force`), `prompt --compact` (smaller prompt), `doctor`
+  (ready exit 0; missing-prerequisite / no-repo exit 1 with actionable output).

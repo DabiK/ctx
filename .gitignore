@@ -3,3 +3,8 @@
 .ralph-reviews.log
 .ralph-run.log
 .ralph-stop
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo

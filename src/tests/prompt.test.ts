@@ -72,19 +72,32 @@ describe("prompt builders", () => {
   });
 
   it("both teach request and response markers", () => {
-    for (const p of [buildPrompt(), buildCompactPrompt()]) {
-      assert.ok(p.includes("@ctx"));
-      assert.ok(p.includes(RESPONSE_MARKER));
-      assert.ok(p.includes("ctx read"));
-      assert.ok(p.includes("ctx watch"));
+    for (const prompt of [buildPrompt(), buildCompactPrompt()]) {
+      assert.ok(prompt.includes("@ctx"));
+      assert.ok(prompt.includes(RESPONSE_MARKER));
+      assert.ok(prompt.includes("ctx read"));
+      assert.ok(prompt.includes("ctx watch"));
     }
   });
 
   it("teaches the clipboard round trip without asking for init again", () => {
-    for (const p of [buildPrompt(), buildCompactPrompt()]) {
-      assert.ok(p.includes("standalone @ctx block"));
-      assert.ok(p.toLowerCase().includes("read request"));
-      assert.ok(p.includes("Do not ask"));
+    for (const prompt of [buildPrompt(), buildCompactPrompt()]) {
+      assert.ok(prompt.includes("standalone @ctx block"));
+      assert.ok(prompt.toLowerCase().includes("read request"));
+      assert.ok(prompt.includes("Do not ask"));
     }
+  });
+
+  it("requires an unambiguous single-block response and multi-file patch", () => {
+    for (const prompt of [buildPrompt(), buildCompactPrompt()]) {
+      assert.ok(prompt.includes("exactly one raw"));
+      assert.ok(prompt.includes("Never echo"));
+      assert.ok(prompt.includes("never several writes"));
+      assert.ok(prompt.includes("terminal"));
+      assert.ok(prompt.includes("TUI"));
+      assert.ok(prompt.includes("outer protocol block"));
+      assert.ok(prompt.includes("fenced body"));
+    }
+    assert.ok(!buildPrompt().includes("```\n@ctx file"));
   });
 });

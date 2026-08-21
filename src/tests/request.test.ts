@@ -74,6 +74,8 @@ describe("RequestUseCase.read", () => {
     assert.ok(copied.includes("## Request refused"));
     assert.ok(copied.includes("unsupported operation `explode`"));
     assert.ok(copied.includes("batch (a block of @ctx read operations)"));
+    assert.ok(copied.includes("## LLM repair instruction"));
+    assert.ok(copied.includes("one replacement `@ctx` protocol block only"));
   });
 
   it("reports when the clipboard contains no @ctx request", async () => {

@@ -8,7 +8,7 @@
  * requests, and combined requests produce byte-identical blocks.
  */
 
-import { RESPONSE_MARKER } from "../branding.js";
+import { REQUEST_MARKER, RESPONSE_MARKER } from "../branding.js";
 import { estimateTokens, utf8ByteLength } from "./common.js";
 import type { GitDiff, GitLogEntry, GitShowResult, GitStatus, GitStatusFile } from "./ports.js";
 
@@ -466,6 +466,11 @@ export function buildRefusalResponse(reason: string, supported: string): string 
     "## Request refused",
     reason,
     `This build supports: ${supported}`,
+    "",
+    "## LLM repair instruction",
+    `Reply with one replacement \`${REQUEST_MARKER}\` protocol block only. Do not repeat this response,`,
+    "do not wrap the block in Markdown, and do not give terminal or TUI instructions.",
+    `For a change touching multiple files, return one \`${REQUEST_MARKER} patch\` unified diff.`,
   ].join("\n") + "\n";
 }
 

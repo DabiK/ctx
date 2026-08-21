@@ -519,7 +519,8 @@ export function parseRequestText(text: string): ParsedRequest {
     return null;
   };
 
-  for (const rawLine of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i] ?? "";
     const trimmed = rawLine.trim();
     if (collecting !== null) {
       // Inside a proposal body. A request line ends the body (unless we are
@@ -566,6 +567,17 @@ export function parseRequestText(text: string): ParsedRequest {
         };
       }
       if (args.length !== 0) {
+        const inlineMembers = rest
+          .slice("batch".length)
+          .trim()
+          .split(/\s+(?=@ctx\b)/)
+          .filter((part) => part.startsWith(REQUEST_MARKER));
+        if (inlineMembers.length > 0) {
+          inBatch = true;
+          sawBatch = true;
+          lines.splice(i + 1, 0, ...inlineMembers);
+          continue;
+        }
         return {
           ok: false,
           reason: `\`${REQUEST_MARKER} batch\` accepts no arguments (got: ${args.join(" ")})`,

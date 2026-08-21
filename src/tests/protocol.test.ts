@@ -144,6 +144,20 @@ describe("parseRequestText", () => {
     }
   });
 
+  it("parses inline batch members written on the same line", () => {
+    const r = parseRequestText('@ctx batch @ctx status @ctx log --limit 3 @ctx diff --staged src/app.ts @ctx search "Controller.java"');
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.batch, true);
+      assert.deepEqual(r.ops, [
+        { kind: "status" },
+        { kind: "log", limit: 3, path: null },
+        { kind: "diff", staged: true, path: "src/app.ts" },
+        { kind: "search", query: "Controller.java" },
+      ]);
+    }
+  });
+
   it("keeps operations before the batch outside it but still orders them", () => {
     const r = parseRequestText(
       ["@ctx file a.ts", "@ctx batch", "@ctx tree --depth 2", "chat text", "@ctx changed"].join("\n"),

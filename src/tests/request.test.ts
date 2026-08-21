@@ -220,6 +220,22 @@ describe("RequestUseCase.read", () => {
     assert.equal(copied.split(RESPONSE_MARKER).length - 1, 1, "one response marker");
   });
 
+  it("executes an inline @ctx batch from one physical line", async () => {
+    const { ports, clipboard, fs, search } = fakePorts();
+    seedRepo(fs);
+    search.matches = [{ relPath: "src/other.ts", line: 1, content: "other" }];
+    clipboard.content = '@ctx batch @ctx file src/app.ts:2-2 @ctx search other @ctx status';
+
+    const code = await makeRequest(ports, search).read({ allowSensitive: false });
+
+    assert.equal(code, 0);
+    const copied = clipboard.lastCopied() ?? "";
+    assert.ok(copied.includes("## Batch response"));
+    assert.ok(copied.includes("## file src/app.ts:2-2"));
+    assert.ok(copied.includes('## Search "other" (fake)'));
+    assert.ok(copied.includes("## Status"));
+  });
+
   it("gives a @ctx batch of file reads the batch envelope", async () => {
     const { ports, clipboard, fs } = fakePorts();
     seedRepo(fs);
